@@ -123,6 +123,19 @@ type RouterOptions struct {
 func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analyticsClient analytics.Client, rdb *redis.Client, opts RouterOptions) (chi.Router, *handler.Handler) {
 	queries := db.New(pool)
 	emailSvc := service.NewEmailService()
+
+	// TOTP service is gated on MULTICA_USER_TOTP_KEY env. When absent,
+	// the handler nil-checks h.TOTPService and returns 503 on all TOTP
+	// paths, matching the totp_supported=false signal in /api/config.
+	var totpSvc *service.TOTPService
+	if strings.TrimSpace(os.Getenv("MULTICA_USER_TOTP_KEY")) != "" {
+		var err error
+		totpSvc, err = service.NewTOTPService()
+		if err != nil {
+			slog.Warn("totp service init failed; TOTP disabled", "error", err)
+		}
+	}
+
 	daemonHub := opts.DaemonHub
 	if daemonHub == nil {
 		daemonHub = daemonws.NewHub()
@@ -155,6 +168,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		AttachmentDownloadURLTTL: envDuration("ATTACHMENT_DOWNLOAD_URL_TTL", 30*time.Minute),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
+	h.TOTPService = totpSvc
 	h.Metrics = opts.BusinessMetrics
 	h.TaskService.Metrics = opts.BusinessMetrics
 	h.IssueService.Metrics = opts.BusinessMetrics
@@ -470,6 +484,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.With(authRL).Post("/auth/google", h.GoogleLogin)
 	r.Post("/auth/logout", h.Logout)
 
+	// TOTP — anonymous endpoints (anti-enumeration shim + login step).
+	r.With(authRL).Get("/auth/totp-status", h.TOTPStatus)
+	r.With(authVerifyRL).Post("/auth/login-totp", h.TOTPLogin)
+
 	// Public API
 	r.Get("/api/config", h.GetConfig)
 	r.With(contactSalesRL).Post("/api/contact-sales", h.CreateContactSales)
@@ -644,6 +662,21 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Post("/current/renew", h.RenewCurrentPersonalAccessToken)
 			r.Delete("/{id}", h.RevokePersonalAccessToken)
 		})
+
+		// TOTP — authenticated endpoints (setup, verify, disable, admin reset).
+		// Code-checking endpoints (setup-verify, disable) wear authVerifyRL
+		// so a stolen session cannot brute-force the 6-digit code at
+		// network speed. setup-init is rate-limited too in case a
+		// session is being used to spam new secret generation, which
+		// would also clear the in-progress totp_secret_encrypted.
+		r.Route("/auth/totp", func(r chi.Router) {
+			r.With(authVerifyRL).Post("/setup-init", h.TOTPSetupInit)
+			r.With(authVerifyRL).Post("/setup-verify", h.TOTPSetupVerify)
+			r.With(authVerifyRL).Post("/disable", h.TOTPDisable)
+		})
+		// Admin TOTP reset. Auth enforcement (owner/admin) is handled
+		// inside the handler via h.workspaceMember + role check.
+		r.With(authVerifyRL).Post("/api/workspaces/{wsId}/members/{userId}/totp-reset", h.AdminResetMemberTOTP)
 
 		// Cloud Billing proxy. Same upstream service / port as
 		// cloud-runtime — multica-cloud's Fleet and Billing share
