@@ -59,6 +59,8 @@ export function AuthInitializer({
           // Old servers omit this field — treat that as "email not configured"
           // so the channel toggle shows "Unavailable" instead of a broken toggle.
           emailConfigured: cfg.email_configured === true,
+          // Old servers omit this field — default false so TOTP UI stays hidden.
+          totpSupported: cfg.totp_supported === true,
         });
         configStore.getState().setDaemonConfig({
           daemonServerUrl: cfg.daemon_server_url,
