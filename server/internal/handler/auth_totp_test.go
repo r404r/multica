@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/multica-ai/multica/server/internal/service"
 )
 
@@ -273,6 +274,78 @@ func TestTOTPStatus_AlwaysReturnsConfiguredTrue(t *testing.T) {
 			json.NewDecoder(w.Body).Decode(&resp)
 			if !resp.Configured {
 				t.Errorf("status must always return configured:true for email %q", email)
+			}
+		})
+	}
+}
+
+// TestTOTPRoutes_RequireHumanActorWired pins the security contract that
+// account-level TOTP endpoints (personal setup/verify/disable + admin
+// reset) must never be reachable with a machine credential (mat_ task
+// token or mcn_ cloud-node PAT). If a future change removes the
+// r.Use(RequireHumanActor) / chained .With(RequireHumanActor, ...) wiring
+// in router.go this test fails, even if every per-handler test still
+// passes — because the per-handler tests bypass the route group entirely.
+//
+// Mirrors TestRequireHumanActor_AppliedViaChiRouterUse in actor_guards_test.go
+// but for the TOTP group specifically. The minimal router replicates the
+// production wiring shape from server/cmd/server/router.go:672-696.
+func TestTOTPRoutes_RequireHumanActorWired(t *testing.T) {
+	innerCalled := false
+	innerHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		innerCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	r := chi.NewRouter()
+	// /auth/totp/* group — same wiring shape as production.
+	r.Route("/auth/totp", func(r chi.Router) {
+		r.Use(RequireHumanActor)
+		r.Post("/setup-init", innerHandler)
+		r.Post("/setup-verify", innerHandler)
+		r.Post("/disable", innerHandler)
+	})
+	// admin-reset endpoint — chained .With(RequireHumanActor, ...).
+	r.With(RequireHumanActor).Post(
+		"/api/workspaces/{wsId}/members/{userId}/totp-reset", innerHandler,
+	)
+
+	endpoints := []string{
+		"/auth/totp/setup-init",
+		"/auth/totp/setup-verify",
+		"/auth/totp/disable",
+		"/api/workspaces/00000000-0000-0000-0000-000000000001/members/00000000-0000-0000-0000-000000000002/totp-reset",
+	}
+	machineSources := []string{"task_token", "cloud_pat"}
+
+	for _, ep := range endpoints {
+		for _, src := range machineSources {
+			t.Run(ep+":"+src, func(t *testing.T) {
+				innerCalled = false
+				req := httptest.NewRequest(http.MethodPost, ep, nil)
+				req.Header.Set("X-Actor-Source", src)
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
+				if w.Code != http.StatusForbidden {
+					t.Fatalf("status = %d, want 403", w.Code)
+				}
+				if innerCalled {
+					t.Fatal("inner handler must NOT run for machine actor")
+				}
+			})
+		}
+
+		// Human actor (no X-Actor-Source) passes the guard.
+		t.Run(ep+":human", func(t *testing.T) {
+			innerCalled = false
+			req := httptest.NewRequest(http.MethodPost, ep, nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (guard should pass for human)", w.Code)
+			}
+			if !innerCalled {
+				t.Fatal("inner handler must run for human actor")
 			}
 		})
 	}

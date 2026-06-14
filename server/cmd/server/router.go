@@ -669,14 +669,32 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// network speed. setup-init is rate-limited too in case a
 		// session is being used to spam new secret generation, which
 		// would also clear the in-progress totp_secret_encrypted.
+		//
+		// IMPORTANT — task-token actors are blocked here. The Auth
+		// middleware happily turns an mat_ task token (or an mcn_
+		// cloud-node PAT) into a normal X-User-ID stamp, so an agent
+		// running as its owner could otherwise call setup-init /
+		// setup-verify to enroll an authenticator IT controls on the
+		// owner's account, or use an admin owner's task token to
+		// reset another member's authenticator. TOTP is an
+		// account-level security setting that only the human owner
+		// should be able to change. RequireHumanActor checks the
+		// authoritative server-set X-Actor-Source header and 403s
+		// any machine-credential request. See actor_guards.go for
+		// the full rationale (same gate is used by /api/cloud-billing).
 		r.Route("/auth/totp", func(r chi.Router) {
+			r.Use(handler.RequireHumanActor)
 			r.With(authVerifyRL).Post("/setup-init", h.TOTPSetupInit)
 			r.With(authVerifyRL).Post("/setup-verify", h.TOTPSetupVerify)
 			r.With(authVerifyRL).Post("/disable", h.TOTPDisable)
 		})
 		// Admin TOTP reset. Auth enforcement (owner/admin) is handled
-		// inside the handler via h.workspaceMember + role check.
-		r.With(authVerifyRL).Post("/api/workspaces/{wsId}/members/{userId}/totp-reset", h.AdminResetMemberTOTP)
+		// inside the handler via h.workspaceMember + role check; the
+		// RequireHumanActor wrap here prevents a workspace-admin's
+		// task token from being used to reset a member's authenticator
+		// (same machine-credential concern as the setup/disable group
+		// above).
+		r.With(handler.RequireHumanActor, authVerifyRL).Post("/api/workspaces/{wsId}/members/{userId}/totp-reset", h.AdminResetMemberTOTP)
 
 		// Cloud Billing proxy. Same upstream service / port as
 		// cloud-runtime — multica-cloud's Fleet and Billing share
