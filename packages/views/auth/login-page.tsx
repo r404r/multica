@@ -458,6 +458,9 @@ export function LoginPage({
             >
               {t(($) => $.totp.use_authenticator)}
             </Button>
+            {error && (
+              <p className="text-sm text-destructive">{error}</p>
+            )}
           </CardContent>
           <CardFooter>
             <Button

@@ -723,6 +723,39 @@ describe("LoginPage", () => {
     expect(screen.queryByText(/check your email/i)).not.toBeInTheDocument();
   });
 
+  // -------------------------------------------------------------------------
+  // choose-method send-code error rendering
+  // -------------------------------------------------------------------------
+
+  it("renders sendCode failure on choose-method step (regression: was swallowed)", async () => {
+    mockTotpState.totpSupported = true;
+    // Make sendCode fail on the choose-method path. The pre-fix UI swallowed
+    // this (setError ran but no <p> rendered it), so the user stayed on the
+    // same screen with no feedback on rate-limit / SMTP / network errors.
+    mockSendCode.mockRejectedValueOnce(new Error("Too many requests, try again later"));
+
+    renderWithI18n(<LoginPage onSuccess={onSuccess} />);
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/email/i), "test@example.com");
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    // Land on choose-method.
+    await waitFor(() => {
+      expect(screen.getByText(/how would you like to verify/i)).toBeInTheDocument();
+    });
+
+    // Click email fallback — sendCode rejects.
+    await user.click(screen.getByRole("button", { name: /send code to my email/i }));
+
+    // Error from the rejection must be visible to the user.
+    await waitFor(() => {
+      expect(screen.getByText(/too many requests/i)).toBeInTheDocument();
+    });
+    // Still on choose-method (not transitioned to code step).
+    expect(screen.getByText(/how would you like to verify/i)).toBeInTheDocument();
+  });
+
 });
 
 // ---------------------------------------------------------------------------
