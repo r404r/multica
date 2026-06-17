@@ -24,6 +24,9 @@ import type {
   AgentActivityBucket,
   AgentRunCount,
   AgentRuntime,
+  RuntimeProfile,
+  CreateRuntimeProfileRequest,
+  UpdateRuntimeProfileRequest,
   InboxItem,
   IssueSubscriber,
   Comment,
@@ -523,6 +526,9 @@ export class ApiClient {
     }
     if (params?.open_only) search.set("open_only", "true");
     if (params?.scheduled) search.set("scheduled", "true");
+    if (params?.date_field) search.set("date_field", params.date_field);
+    if (params?.date_start) search.set("date_start", params.date_start);
+    if (params?.date_end) search.set("date_end", params.date_end);
     if (params?.sort_by) search.set("sort", params.sort_by);
     if (params?.sort_direction) search.set("direction", params.sort_direction);
     const path = `/api/issues?${search}`;
@@ -560,6 +566,9 @@ export class ApiClient {
     if (params.label_ids?.length) search.set("label_ids", params.label_ids.join(","));
     if (params.group_assignee_type) search.set("group_assignee_type", params.group_assignee_type);
     if (params.group_assignee_id) search.set("group_assignee_id", params.group_assignee_id);
+    if (params.date_field) search.set("date_field", params.date_field);
+    if (params.date_start) search.set("date_start", params.date_start);
+    if (params.date_end) search.set("date_end", params.date_end);
     if (params.sort_by) search.set("sort", params.sort_by);
     if (params.sort_direction) search.set("direction", params.sort_direction);
     const raw = await this.fetch<unknown>(`/api/issues/grouped?${search}`);
@@ -1124,6 +1133,61 @@ export class ApiClient {
       method: "PATCH",
       body: JSON.stringify(patch),
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // Custom runtime profiles (MUL-3284). All workspace-scoped: the caller
+  // passes the workspace id the same way the runtimes list resolves it.
+  // ---------------------------------------------------------------------
+
+  async listRuntimeProfiles(workspaceId: string): Promise<RuntimeProfile[]> {
+    const res = await this.fetch<{ runtime_profiles?: RuntimeProfile[] }>(
+      `/api/workspaces/${workspaceId}/runtime-profiles`,
+    );
+    return res.runtime_profiles ?? [];
+  }
+
+  async getRuntimeProfile(
+    workspaceId: string,
+    profileId: string,
+  ): Promise<RuntimeProfile> {
+    return this.fetch(
+      `/api/workspaces/${workspaceId}/runtime-profiles/${profileId}`,
+    );
+  }
+
+  async createRuntimeProfile(
+    workspaceId: string,
+    body: CreateRuntimeProfileRequest,
+  ): Promise<RuntimeProfile> {
+    return this.fetch(`/api/workspaces/${workspaceId}/runtime-profiles`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  async updateRuntimeProfile(
+    workspaceId: string,
+    profileId: string,
+    patch: UpdateRuntimeProfileRequest,
+  ): Promise<RuntimeProfile> {
+    return this.fetch(
+      `/api/workspaces/${workspaceId}/runtime-profiles/${profileId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      },
+    );
+  }
+
+  async deleteRuntimeProfile(
+    workspaceId: string,
+    profileId: string,
+  ): Promise<void> {
+    await this.fetch(
+      `/api/workspaces/${workspaceId}/runtime-profiles/${profileId}`,
+      { method: "DELETE" },
+    );
   }
 
   async getRuntimeUsage(
