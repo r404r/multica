@@ -29,6 +29,22 @@ import {
   clearFreezeBreadcrumb,
 } from "./freeze-breadcrumb";
 
+// Guards against registering the will-download handler more than once on the
+// same session. window.webContents.session is shared, and createWindow() can
+// be called again on macOS (app "activate" after all windows are closed).
+const downloadDialogSessions = new WeakSet<Electron.Session>();
+
+function installDownloadSaveDialogHandler(window: BrowserWindow): void {
+  const { session } = window.webContents;
+  if (downloadDialogSessions.has(session)) return;
+  downloadDialogSessions.add(session);
+  session.on("will-download", (_event, item) => {
+    item.setSaveDialogOptions({
+      defaultPath: join(app.getPath("downloads"), item.getFilename()),
+    });
+  });
+}
+
 // Bundled icon used for dock/taskbar branding. macOS/Windows production
 // builds let the OS pick up the icon from the .app bundle / .exe resources,
 // but Linux production needs an explicit BrowserWindow `icon` — AppImage
@@ -144,7 +160,7 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 16, y: 13 },
+    trafficLightPosition: { x: 16, y: 17 },
     show: false,
     autoHideMenuBar: true,
     // Windows/Linux pick up the window/taskbar icon from this option.
@@ -218,6 +234,8 @@ function createWindow(): void {
     lastKnownSystemLocale = current;
     window.webContents.send("locale:system-changed", current);
   });
+
+  installDownloadSaveDialogHandler(window);
 
   window.webContents.setWindowOpenHandler((details) => {
     openExternalSafely(details.url);

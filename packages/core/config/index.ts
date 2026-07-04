@@ -22,6 +22,7 @@ interface ConfigState {
   // TOTP 2FA support flag. Defaults to false so older servers that don't
   // advertise this field degrade gracefully (no TOTP UI shown).
   totpSupported: boolean;
+  featureFlags: Record<string, boolean>;
   setCdnConfig: (config: { cdnDomain: string; cdnSigned?: boolean }) => void;
   setAuthConfig: (config: {
     allowSignup: boolean;
@@ -34,6 +35,7 @@ interface ConfigState {
     daemonServerUrl?: string;
     daemonAppUrl?: string;
   }) => void;
+  setFeatureFlags: (flags?: Record<string, boolean>) => void;
 }
 
 export const configStore = createStore<ConfigState>((set) => ({
@@ -46,15 +48,31 @@ export const configStore = createStore<ConfigState>((set) => ({
   workspaceCreationDisabled: false,
   emailConfigured: false,
   totpSupported: false,
+  featureFlags: {},
   setCdnConfig: ({ cdnDomain, cdnSigned = false }) => set({ cdnDomain, cdnSigned }),
   setAuthConfig: ({ allowSignup, googleClientId = "", workspaceCreationDisabled = false, emailConfigured = false, totpSupported = false }) =>
     set({ allowSignup, googleClientId, workspaceCreationDisabled, emailConfigured, totpSupported }),
   setDaemonConfig: ({ daemonServerUrl = "", daemonAppUrl = "" }) =>
     set({ daemonServerUrl, daemonAppUrl }),
+  setFeatureFlags: (flags = {}) => set({ featureFlags: { ...flags } }),
 }));
 
 export function useConfigStore(): ConfigState;
 export function useConfigStore<T>(selector: (state: ConfigState) => T): T;
 export function useConfigStore<T>(selector?: (state: ConfigState) => T) {
   return useStore(configStore, selector as (state: ConfigState) => T);
+}
+
+export function featureFlagEnabled(
+  flags: Readonly<Record<string, boolean>> | undefined,
+  key: string,
+  defaultValue = false,
+): boolean {
+  return flags?.[key] ?? defaultValue;
+}
+
+export function useFeatureEnabled(key: string, defaultValue = false): boolean {
+  return useConfigStore((state) =>
+    featureFlagEnabled(state.featureFlags, key, defaultValue),
+  );
 }

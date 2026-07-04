@@ -4,6 +4,47 @@ export type AgentRuntimeMode = "local" | "cloud";
 
 export type AgentVisibility = "workspace" | "private";
 
+// ---------------------------------------------------------------------------
+// Agent invocation permissions (MUL-3963)
+//
+// `permission_mode` + `invocation_targets` are the AUTHORITATIVE gate for who
+// may TRIGGER / assign / @mention / chat an agent. The legacy `visibility`
+// field REMAINS but is now DERIVED on the backend from these two: a
+// `public_to` agent WITH a workspace target maps to `visibility: "workspace"`;
+// everything else (private, or public_to scoped only to member/team targets)
+// maps to `visibility: "private"`.
+//
+// Invocation semantics:
+//   - owner: always
+//   - permission_mode "private": ONLY the owner (workspace admins no longer
+//     bypass — the key behavior change vs the old visibility model)
+//   - permission_mode "public_to" + workspace target: any workspace member
+//   - permission_mode "public_to" + member target: only the matching user
+//   - team target: reserved, INERT in v1 (never grants)
+// ---------------------------------------------------------------------------
+
+export type AgentPermissionMode = "private" | "public_to";
+
+/**
+ * A single invocation grant on an agent. `target_id` is `null` for the
+ * workspace target (the grant covers every workspace member); it carries the
+ * member / team id for the scoped grants.
+ */
+export interface AgentInvocationTarget {
+  target_type: "workspace" | "member" | "team";
+  target_id: string | null;
+}
+
+/**
+ * Wire shape for invocation targets on CREATE / UPDATE requests. For a
+ * workspace target the client may omit `target_id` (the backend fills the
+ * workspace id); member / team targets REQUIRE it.
+ */
+export interface AgentInvocationTargetInput {
+  target_type: "workspace" | "member" | "team";
+  target_id?: string;
+}
+
 // Runtime visibility is a separate axis from agent visibility — different
 // vocabulary because it gates a different action. "private" (default) means
 // only the runtime owner and workspace admins can bind agents to it;
@@ -63,12 +104,12 @@ export const RUNTIME_PROFILE_PROTOCOL_FAMILIES = [
   "opencode",
   "openclaw",
   "hermes",
-  "gemini",
   "pi",
   "cursor",
   "kimi",
   "kiro",
   "antigravity",
+  "qoder",
 ] as const;
 
 export type RuntimeProtocolFamily =
@@ -197,6 +238,13 @@ export interface AgentTask {
    */
   trigger_summary?: string;
   /**
+   * Handoff instruction the assigner attached when starting this run (MUL-3375).
+   * Present only on assignment-triggered runs that carried a note; the execution
+   * log shows it inline as the trigger reason. Absent (legacy / no note) falls
+   * back to the generic "initial run" label.
+   */
+  handoff_note?: string;
+  /**
    * Server-computed source discriminator used by the activity row to label
    * tasks that have no linked issue (so e.g. quick-create tasks render
    * with a meaningful title instead of falling through to "Untracked").
@@ -275,7 +323,36 @@ export interface Agent {
    * Older backends omit this field; treat `undefined` as false.
    */
   mcp_config_redacted?: boolean;
+  /**
+   * The subset of Composio toolkit slugs this agent is allowed to mount as
+   * MCP servers at task dispatch — but only when the run originator is the
+   * agent owner (MUL-3869 / MUL-3721). `null`/`[]`/omitted all mean "no
+   * overlay regardless of who triggers". Owner-only data: the server hands
+   * it through verbatim to the owner and redacts it to `undefined` +
+   * `composio_toolkit_allowlist_redacted=true` for everyone else (same
+   * contract as `mcp_config`). Treat `undefined` as "unknown — assume none".
+   */
+  composio_toolkit_allowlist?: string[];
+  /**
+   * True when the server stripped `composio_toolkit_allowlist` from this
+   * response because the caller is not the agent owner. The MCP tab is
+   * creator-only so a redacted value should never reach the editor, but the
+   * UI renders a "hidden" fallback defensively. Older backends omit this
+   * field; treat `undefined` as false.
+   */
+  composio_toolkit_allowlist_redacted?: boolean;
   visibility: AgentVisibility;
+  /**
+   * Authoritative invocation permission mode (MUL-3963). The `visibility`
+   * field above is DERIVED from this on the backend. The current backend
+   * always returns this field.
+   */
+  permission_mode: AgentPermissionMode;
+  /**
+   * Invocation grants backing `permission_mode === "public_to"` (empty for a
+   * private agent). See `AgentInvocationTarget`.
+   */
+  invocation_targets: AgentInvocationTarget[];
   status: AgentStatus;
   max_concurrent_tasks: number;
   model: string;
@@ -321,6 +398,16 @@ export interface CreateAgentRequest {
   custom_env?: Record<string, string>;
   custom_args?: string[];
   visibility?: AgentVisibility;
+  /**
+   * Invocation permission mode (MUL-3963). When present it is authoritative;
+   * when absent the backend maps the legacy `visibility` field
+   * (private -> private, workspace -> public_to + workspace target). On
+   * UPDATE, permission changes are OWNER-ONLY (the backend silently ignores
+   * these fields from non-owner admins).
+   */
+  permission_mode?: AgentPermissionMode;
+  /** Invocation grants — see `AgentInvocationTargetInput`. */
+  invocation_targets?: AgentInvocationTargetInput[];
   max_concurrent_tasks?: number;
   model?: string;
   /** Optional runtime-native reasoning/effort token. See `Agent.thinking_level`. */
@@ -371,6 +458,16 @@ export interface CreateAgentFromTemplateRequest {
   runtime_id: string;
   model?: string;
   visibility?: AgentVisibility;
+  /**
+   * Invocation permission mode (MUL-3963). When present it is authoritative;
+   * when absent the backend maps the legacy `visibility` field
+   * (private -> private, workspace -> public_to + workspace target). On
+   * UPDATE, permission changes are OWNER-ONLY (the backend silently ignores
+   * these fields from non-owner admins).
+   */
+  permission_mode?: AgentPermissionMode;
+  /** Invocation grants — see `AgentInvocationTargetInput`. */
+  invocation_targets?: AgentInvocationTargetInput[];
   max_concurrent_tasks?: number;
   /** Optional overrides applied to the template before creation. nil/omit
    *  uses the template's own value. */
@@ -426,7 +523,29 @@ export interface UpdateAgentRequest {
    *     validate / translate it according to their own MCP integration
    */
   mcp_config?: unknown | null;
+  /**
+   * Composio toolkit allowlist. Tri-state semantics, mirroring the backend
+   * gate (MUL-3869):
+   *   - field omitted → no change
+   *   - `null` → clear the column (no MCP overlay for anyone)
+   *   - string[] → wholesale replace; the server lowercases / trims / dedupes
+   *     the slugs before persisting
+   * Writes are silently dropped server-side unless the caller is the agent
+   * owner, so the UI only ever exposes this field through the creator-only
+   * MCP tab.
+   */
+  composio_toolkit_allowlist?: string[] | null;
   visibility?: AgentVisibility;
+  /**
+   * Invocation permission mode (MUL-3963). When present it is authoritative;
+   * when absent the backend maps the legacy `visibility` field
+   * (private -> private, workspace -> public_to + workspace target). On
+   * UPDATE, permission changes are OWNER-ONLY (the backend silently ignores
+   * these fields from non-owner admins).
+   */
+  permission_mode?: AgentPermissionMode;
+  /** Invocation grants — see `AgentInvocationTargetInput`. */
+  invocation_targets?: AgentInvocationTargetInput[];
   status?: AgentStatus;
   max_concurrent_tasks?: number;
   model?: string;
@@ -542,12 +661,14 @@ export interface RuntimeHourlyActivity {
   count: number;
 }
 
-// One (agent, model) row of the "Cost by agent" tab on the runtime detail
-// page. Model stays on the wire because cost is computed client-side from
-// a per-model pricing table — the client groups these rows by agent_id and
-// sums cost per agent across models.
+// One (agent, provider, model) row of the "Cost by agent" tab on the runtime
+// detail page. provider + model stay on the wire because cost is computed
+// client-side from a per-model pricing table (provider disambiguates bare
+// model ids that collide across providers) — the client groups these rows by
+// agent_id and sums cost per agent across models.
 export interface RuntimeUsageByAgent {
   agent_id: string;
+  provider: string;
   model: string;
   input_tokens: number;
   output_tokens: number;
@@ -569,12 +690,15 @@ export interface RuntimeUsageByHour {
   task_count: number;
 }
 
-// One (date, model) bucket of token usage for the workspace dashboard.
-// Same shape as RuntimeUsage but workspace-scoped (no runtime_id, no
-// provider field on the wire) and optionally narrowed to a single project
-// on the server side. Cost stays client-side via the model pricing table.
+// One (date, provider, model) bucket of token usage for the workspace
+// dashboard. Workspace-scoped (no runtime_id) and optionally narrowed to a
+// single project on the server side. `provider` is kept on the wire so the
+// client can disambiguate bare model ids that collide across providers
+// (e.g. Cursor's `auto` vs another provider's `auto`) when pricing. Cost
+// stays client-side via the model pricing table.
 export interface DashboardUsageDaily {
   date: string;
+  provider: string;
   model: string;
   input_tokens: number;
   output_tokens: number;
@@ -588,6 +712,7 @@ export interface DashboardUsageDaily {
 // sums cost.
 export interface DashboardUsageByAgent {
   agent_id: string;
+  provider: string;
   model: string;
   input_tokens: number;
   output_tokens: number;
@@ -719,6 +844,14 @@ export interface RuntimeLocalSkillSummary {
   description?: string;
   source_path: string;
   provider: string;
+  /**
+   * Which discovery root surfaced this skill: "provider" for the runtime's
+   * own skill directory (e.g. ~/.claude/skills) or "universal" for the
+   * cross-tool ~/.agents/skills fallback. Daemons that predate multi-root
+   * discovery omit the field; treat `undefined` as unknown rather than
+   * asserting either origin.
+   */
+  root?: "provider" | "universal";
   file_count: number;
 }
 

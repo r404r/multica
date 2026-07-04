@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -11,6 +12,21 @@ import (
 	skillpkg "github.com/multica-ai/multica/server/internal/skill"
 	"gopkg.in/yaml.v3"
 )
+
+// TaskContextMarkerRelPath is a non-secret marker the daemon writes under the
+// task workdir. The CLI uses it as a fallback daemon-task signal when a child
+// sandbox strips all MULTICA_* env vars before invoking `multica`.
+const TaskContextMarkerRelPath = ".multica/daemon_task_context.json"
+
+// TaskContextMarkerManagedBy is the marker discriminator the CLI checks before
+// treating TaskContextMarkerRelPath as daemon-owned.
+const TaskContextMarkerManagedBy = "multica-daemon-task"
+
+type taskContextMarkerFile struct {
+	ManagedBy string `json:"managed_by"`
+	AgentID   string `json:"agent_id,omitempty"`
+	IssueID   string `json:"issue_id,omitempty"`
+}
 
 // writeContextFiles renders and writes .agent_context/issue_context.md and
 // skills into the appropriate provider-native location.
@@ -24,6 +40,7 @@ import (
 // Cursor:      skills → {workDir}/.cursor/skills/{name}/SKILL.md  (native discovery)
 // Kimi:        skills → {workDir}/.kimi/skills/{name}/SKILL.md  (native discovery)
 // Kiro:        skills → {workDir}/.kiro/skills/{name}/SKILL.md  (native discovery)
+// Qoder:       skills → {workDir}/.qoder/skills/{name}/SKILL.md  (project-level; see docs.qoder.com/cli/Skills.md)
 // Antigravity: skills → {workDir}/.agents/skills/{name}/SKILL.md  (native discovery — see https://antigravity.google/docs/gcli-migration "Workspace skills")
 // Default:     skills → {workDir}/.agent_context/skills/{name}/SKILL.md
 //
@@ -34,6 +51,10 @@ import (
 // cloud-mode tasks whose envRoot is wiped wholesale by the GC loop — may
 // pass nil to skip the bookkeeping entirely.
 func writeContextFiles(workDir, provider string, ctx TaskContextForEnv, manifest *sidecarManifest) error {
+	if err := writeTaskContextMarker(workDir, ctx, manifest); err != nil {
+		return err
+	}
+
 	contextDir := filepath.Join(workDir, ".agent_context")
 	if err := recordMkdirAll(contextDir, 0o755, manifest); err != nil {
 		return fmt.Errorf("create .agent_context dir: %w", err)
@@ -47,7 +68,7 @@ func writeContextFiles(workDir, provider string, ctx TaskContextForEnv, manifest
 		// themselves or it survived from a crashed prior run we can't
 		// safely distinguish from intentional content. Refusing the
 		// write is the correct call: the runtime brief (CLAUDE.md /
-		// AGENTS.md / GEMINI.md) already carries every fact this file
+		// AGENTS.md) already carries every fact this file
 		// would, so the agent runs fine without the sidecar copy.
 		// Anything else is a real failure.
 		if !errors.Is(err, errPathPreExists) {
@@ -80,13 +101,55 @@ func writeContextFiles(workDir, provider string, ctx TaskContextForEnv, manifest
 	return nil
 }
 
+func writeTaskContextMarker(workDir string, ctx TaskContextForEnv, manifest *sidecarManifest) error {
+	dir := filepath.Dir(filepath.Join(workDir, TaskContextMarkerRelPath))
+	if err := recordMkdirAll(dir, 0o755, manifest); err != nil {
+		return fmt.Errorf("create .multica dir: %w", err)
+	}
+	// The sidecar manifest removes this marker on normal local_directory
+	// cleanup. If a crash leaves it behind, the CLI intentionally treats it
+	// as daemon context and fails closed instead of using a user PAT.
+	payload := taskContextMarkerFile{
+		ManagedBy: TaskContextMarkerManagedBy,
+		AgentID:   ctx.AgentID,
+		IssueID:   ctx.IssueID,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal task context marker: %w", err)
+	}
+	if err := recordWriteFile(filepath.Join(workDir, TaskContextMarkerRelPath), data, 0o644, manifest); err != nil {
+		if errors.Is(err, errPathPreExists) {
+			path := filepath.Join(workDir, TaskContextMarkerRelPath)
+			existing, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return fmt.Errorf("read existing task context marker: %w", readErr)
+			}
+			var marker taskContextMarkerFile
+			if json.Unmarshal(existing, &marker) != nil || marker.ManagedBy != TaskContextMarkerManagedBy {
+				return fmt.Errorf("write task context marker: %w", err)
+			}
+			if writeErr := os.WriteFile(path, data, 0o644); writeErr != nil {
+				return fmt.Errorf("refresh task context marker: %w", writeErr)
+			}
+			if manifest != nil {
+				manifest.Files = append(manifest.Files, path)
+			}
+			return nil
+		}
+		return fmt.Errorf("write task context marker: %w", err)
+	}
+	return nil
+}
+
 // projectResourceFile is the on-disk JSON written into the agent's working
 // directory. Schema is intentionally a thin pass-through of the API response
 // so consumers (skills, future tooling) don't need a separate parser.
 type projectResourceFile struct {
-	ProjectID    string                  `json:"project_id,omitempty"`
-	ProjectTitle string                  `json:"project_title,omitempty"`
-	Resources    []ProjectResourceForEnv `json:"resources"`
+	ProjectID          string                  `json:"project_id,omitempty"`
+	ProjectTitle       string                  `json:"project_title,omitempty"`
+	ProjectDescription string                  `json:"project_description,omitempty"`
+	Resources          []ProjectResourceForEnv `json:"resources"`
 }
 
 // MarshalJSON renders the resource_ref field as raw JSON instead of a base64
@@ -131,9 +194,10 @@ func writeProjectResources(workDir string, ctx TaskContextForEnv, manifest *side
 		resources = []ProjectResourceForEnv{}
 	}
 	payload := projectResourceFile{
-		ProjectID:    ctx.ProjectID,
-		ProjectTitle: ctx.ProjectTitle,
-		Resources:    resources,
+		ProjectID:          ctx.ProjectID,
+		ProjectTitle:       ctx.ProjectTitle,
+		ProjectDescription: ctx.ProjectDescription,
+		Resources:          resources,
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -212,6 +276,15 @@ func skillsDirPath(workDir, provider string) string {
 		// Kiro CLI auto-discovers project-level skills from .kiro/skills/
 		// in the workdir.
 		return filepath.Join(workDir, ".kiro", "skills")
+	case "qoder":
+		// Qoder CLI discovers project-level skills under .qoder/skills/.
+		// See https://docs.qoder.com/cli/Skills.md
+		return filepath.Join(workDir, ".qoder", "skills")
+	case "traecli":
+		// Official TRAE CLI discovers project-level skills from .traecli/skills/
+		// in the workdir (global skills live in ~/.traecli/skills). See
+		// https://docs.trae.cn/cli_skills
+		return filepath.Join(workDir, ".traecli", "skills")
 	case "antigravity":
 		// Antigravity (`agy`) auto-discovers workspace-level skills from
 		// .agents/skills/ in the workdir. The CLI inherits Gemini CLI's
@@ -494,6 +567,14 @@ func renderIssueContext(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("**Triggering comment ID:** `" + ctx.TriggerCommentID + "`\n\n")
 	} else {
 		b.WriteString("**Trigger:** New Assignment\n\n")
+	}
+
+	// Assignment handoff note (MUL-3375): the assigner's scoping instruction for
+	// this run. Distinct from a comment — there is no thread to reply to.
+	if ctx.HandoffNote != "" {
+		b.WriteString("## Handoff Note\n\n")
+		b.WriteString("The person who assigned this issue left this instruction for the run. Treat it as scope guidance and follow it before doing anything broader:\n\n")
+		fmt.Fprintf(&b, "> %s\n\n", ctx.HandoffNote)
 	}
 
 	b.WriteString("## Quick Start\n\n")

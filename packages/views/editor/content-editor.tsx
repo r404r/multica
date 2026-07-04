@@ -26,7 +26,7 @@
  * 3. PREPROCESSING is minimal: only legacy mention shortcode migration and
  *    URL linkification (preprocessMarkdown). No HTML conversion.
  *
- * Tech: Tiptap v3.22.1 (ProseMirror wrapper), @tiptap/markdown for
+ * Tech: Tiptap v3 (ProseMirror wrapper), @tiptap/markdown for
  * bidirectional Markdown ↔ ProseMirror JSON conversion.
  */
 
@@ -39,7 +39,7 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { useEditor, EditorContent } from "@tiptap/react";
+import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import { cn } from "@multica/ui/lib/utils";
 import type { UploadResult } from "@multica/core/hooks/use-file-upload";
 import { useWorkspaceSlug } from "@multica/core/paths";
@@ -54,6 +54,7 @@ import type { MentionItem } from "./extensions/mention-suggestion";
 import { createEditorExtensions } from "./extensions";
 import { uploadAndInsertFile } from "./extensions/file-upload";
 import { preprocessMarkdown } from "./utils/preprocess";
+import { repairEmptyListItems } from "./utils/repair-list-items";
 import { openLink, isMentionHref } from "./utils/link-handler";
 import { EditorBubbleMenu } from "./bubble-menu";
 import { useLinkHover, LinkHoverCard } from "./link-hover-card";
@@ -71,6 +72,33 @@ const BLOB_IMAGE_RE = /!\[[^\]]*\]\(blob:[^)]*\)\n?/g;
 
 function stripBlobUrls(md: string): string {
   return md.replace(BLOB_IMAGE_RE, "");
+}
+
+/** Canonical comparison form for a markdown string: drop process-local blob
+ *  URLs and trailing blank lines so both sides of a dirty check compare
+ *  like-for-like. One definition for the normalization rule — a future tweak
+ *  (e.g. stripping another ephemeral token) lands here instead of in the
+ *  several call sites it used to be copy-pasted across. */
+function normalizeMarkdown(md: string): string {
+  return stripBlobUrls(md).trimEnd();
+}
+
+/** `normalizeMarkdown` applied to the live editor's serialized content. */
+function normalizeEditorMarkdown(editor: Editor): string {
+  return normalizeMarkdown(editor.getMarkdown());
+}
+
+/** True when any node in the document is mid-upload (`attrs.uploading`). The
+ *  `return !found` early-out matches the original inline scans verbatim: in
+ *  ProseMirror it only stops descending into the matched node's subtree (not
+ *  the whole walk), but once `found` flips true the boolean result is fixed. */
+function hasUploadingNode(editor: Editor): boolean {
+  let found = false;
+  editor.state.doc.descendants((node) => {
+    if (node.attrs.uploading) found = true;
+    return !found;
+  });
+  return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +305,6 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
 
     const editor = useEditor({
       immediatelyRender: false,
-      // Note: in v3.22.1 the default is already false/undefined (same behavior).
       // Explicit for clarity — the real perf win is useEditorState in BubbleMenu.
       shouldRerenderOnTransaction: false,
       onCreate: ({ editor: ed }) => {
@@ -299,7 +326,11 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
             });
           }
         }
-        lastEmittedRef.current = stripBlobUrls(ed.getMarkdown()).trimEnd();
+        // A markdown draft ending in an empty list item (e.g. `"1. \n\n"` left
+        // after typing `1.`) parses into a caretless, schema-invalid item;
+        // repair it so the mounted editor has a real cursor in the list.
+        repairEmptyListItems(ed);
+        lastEmittedRef.current = normalizeEditorMarkdown(ed);
       },
       content: mountChunked ? "" : initialContent,
       contentType: mountChunked
@@ -322,13 +353,13 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
       onUpdate: ({ editor: ed }) => {
         if (!onUpdateRef.current) return;
         if (flushPendingOnUnmountRef.current) {
-          pendingFlushRef.current = stripBlobUrls(ed.getMarkdown()).trimEnd();
+          pendingFlushRef.current = normalizeEditorMarkdown(ed);
         }
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
           debounceRef.current = undefined;
           pendingFlushRef.current = null;
-          const md = stripBlobUrls(ed.getMarkdown()).trimEnd();
+          const md = normalizeEditorMarkdown(ed);
           if (md === lastEmittedRef.current) return;
           lastEmittedRef.current = md;
           onUpdateRef.current?.(md);
@@ -392,14 +423,9 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
       // finalize can no longer find it (the file vanishes, leaving an empty
       // `!file[name]()`). Like the dirty guards below, an uploading node is
       // local state that an external sync must not overwrite.
-      let hasUploadingNode = false;
-      editor.state.doc.descendants((node) => {
-        if (node.attrs.uploading) hasUploadingNode = true;
-        return !hasUploadingNode;
-      });
-      if (hasUploadingNode) return;
+      if (hasUploadingNode(editor)) return;
 
-      const current = stripBlobUrls(editor.getMarkdown()).trimEnd();
+      const current = normalizeEditorMarkdown(editor);
       // "Dirty" = user has local edits not yet flushed through the debounced
       // `onUpdate`. `lastEmittedRef` is advanced only after a debounce fire,
       // so a divergence means the editor holds unsaved bytes.
@@ -420,7 +446,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
       if (isDirty) return;
 
       const incoming = defaultValue ? preprocessMarkdown(defaultValue) : "";
-      const incomingNormalized = stripBlobUrls(incoming).trimEnd();
+      const incomingNormalized = normalizeMarkdown(incoming);
       // Guard 3: normalized-equal short-circuit. Avoids a no-op transaction
       // when the cache reflects a write this same editor just emitted.
       if (incomingNormalized === current) return;
@@ -446,18 +472,24 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
         });
       }
 
-      // Clamp prior selection to the new doc size so the caret doesn't snap
-      // to position 0 after ProseMirror replaces the document.
-      const docSize = editor.state.doc.content.size;
-      editor.commands.setTextSelection({
-        from: Math.min(from, docSize),
-        to: Math.min(to, docSize),
-      });
+      // An empty list item in the incoming markdown parses into a caretless,
+      // schema-invalid node; repair it and let it own the caret. Otherwise clamp
+      // the prior selection to the new doc size so the caret doesn't snap to
+      // position 0 after ProseMirror replaces the document.
+      if (!repairEmptyListItems(editor, { from, to })) {
+        const docSize = editor.state.doc.content.size;
+        editor.commands.setTextSelection({
+          from: Math.min(from, docSize),
+          to: Math.min(to, docSize),
+        });
+      }
 
-      lastEmittedRef.current = stripBlobUrls(editor.getMarkdown()).trimEnd();
+      lastEmittedRef.current = normalizeEditorMarkdown(editor);
     }, [defaultValue, editor]);
 
     useImperativeHandle(ref, () => ({
+      // Intentionally NOT routed through `normalizeMarkdown` — this refactor
+      // must preserve the exact current return value (no `trimEnd`).
       getMarkdown: () => stripBlobUrls(editor?.getMarkdown() ?? ""),
       clearContent: () => {
         editor?.commands.clearContent();
@@ -473,15 +505,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
         const endPos = editor.state.doc.content.size;
         uploadAndInsertFile(editor, file, onUploadFileRef.current, endPos);
       },
-      hasActiveUploads: () => {
-        if (!editor) return false;
-        let uploading = false;
-        editor.state.doc.descendants((node) => {
-          if (node.attrs.uploading) uploading = true;
-          return !uploading;
-        });
-        return uploading;
-      },
+      hasActiveUploads: () => (editor ? hasUploadingNode(editor) : false),
     }));
 
     // Link hover card — disabled when BubbleMenu is active (has selection)

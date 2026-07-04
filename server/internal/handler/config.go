@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/multica-ai/multica/server/internal/analytics"
+	"github.com/multica-ai/multica/server/internal/featureflags"
 )
 
 type AppConfig struct {
@@ -57,6 +58,10 @@ type AppConfig struct {
 	// "Unavailable" hint and the login form never offers the authenticator
 	// option; the backend rejects setup/login-totp with 503.
 	TOTPSupported bool `json:"totp_supported,omitempty"`
+
+	// FeatureFlags exposes only frontend-safe boolean decisions. Do not dump
+	// raw rules here: /api/config is public and may be called anonymously.
+	FeatureFlags map[string]bool `json:"feature_flags,omitempty"`
 }
 
 // GetConfig is mounted on the public (unauthenticated) route group because
@@ -74,6 +79,7 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	config.CdnSigned = h.CFSigner != nil
 	config.DaemonServerURL, config.DaemonAppURL = daemonSetupURLsFromEnv()
+	config.FeatureFlags = featureflags.EvaluateFrontendPublicFlags(r.Context(), h.FeatureFlags)
 
 	// Reflect whether TOTPService actually initialized — not just env presence.
 	// If MULTICA_USER_TOTP_KEY is set but malformed (e.g. wrong length),
