@@ -47,7 +47,6 @@ func TestTOTPSetupInit_RequiresAuth(t *testing.T) {
 		t.Errorf("expected 401, got %d", w.Code)
 	}
 }
-
 // TestTOTPSetupVerify_RequiresAuth verifies that setup-verify also requires auth.
 func TestTOTPSetupVerify_RequiresAuth(t *testing.T) {
 	body, _ := json.Marshal(map[string]string{"code": "123456"})
@@ -350,4 +349,3 @@ func TestTOTPRoutes_RequireHumanActorWired(t *testing.T) {
 		})
 	}
 }
-

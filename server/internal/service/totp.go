@@ -75,4 +75,3 @@ func (s *TOTPService) OpenSecret(sealed []byte) (string, error) {
 	}
 	return string(plain), nil
 }
-

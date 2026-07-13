@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Dialog,
   DialogContent,
@@ -34,23 +34,46 @@ export function TOTPSetupDialog(props: {
   const [secret, setSecret] = useState("");
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
+  const setupInitPromiseRef = useRef<
+    ReturnType<typeof api.totpSetupInit> | undefined
+  >(undefined);
 
   // Fetch setup-init data when dialog opens and we're on the QR step without
   // a URI yet. We guard on !otpauth so a re-render while the dialog is open
   // doesn't fire a second request.
   useEffect(() => {
     if (props.open && step === "qr" && !otpauth) {
-      api
-        .totpSetupInit()
+      // Reuse a pending request if the controlled dialog closes and reopens
+      // before setup initialization completes. Starting a second request can
+      // replace the server-side secret while the first QR code is still being
+      // displayed.
+      const request = setupInitPromiseRef.current ?? api.totpSetupInit();
+      setupInitPromiseRef.current = request;
+      let active = true;
+
+      void request
         .then(({ secret: s, otpauth_url }) => {
+          if (!active) return;
           setSecret(s);
           setOtpauth(otpauth_url);
         })
         .catch(() => {
+          if (!active) return;
           toast.error(t(($) => $.security.two_factor.setup_init_error));
           props.onOpenChange(false);
         });
+
+      void request.finally(() => {
+        if (setupInitPromiseRef.current === request) {
+          setupInitPromiseRef.current = undefined;
+        }
+      }).catch(() => {});
+
+      return () => {
+        active = false;
+      };
     }
+    return undefined;
   }, [props.open, step, otpauth]);
 
   // Reset all state when the dialog closes so the next open starts fresh.
