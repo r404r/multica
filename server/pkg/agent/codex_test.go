@@ -1502,6 +1502,96 @@ func TestCodexExecuteSurfacesStderrWhenChildExitsEarly(t *testing.T) {
 	}
 }
 
+func TestCodexExecuteStartupRPCsHaveBoundedHandshakeTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	// Every startup RPC shares one handshake bound, so the *successful*
+	// preamble RPCs (e.g. initialize) must also round-trip within it. The fake
+	// app-server is a forked /bin/sh script; under parallel test load its
+	// startup + first read/echo can spike well past a few hundred ms, which
+	// used to make initialize spuriously time out before the subtest reached
+	// the RPC it targets. Keep this comfortably above sh startup jitter yet
+	// below the 5s semantic timeout and the 10s executeFakeCodex ceiling.
+	const handshakeTimeout = 3 * time.Second
+	tests := []struct {
+		name   string
+		method string
+		body   string
+		opts   ExecOptions
+	}{
+		{
+			name:   "initialize",
+			method: "initialize",
+			body: "" +
+				`read line` + "\n" +
+				`read line` + "\n",
+		},
+		{
+			name:   "thread start",
+			method: "thread/start",
+			body: "" +
+				`read line` + "\n" +
+				`echo '{"jsonrpc":"2.0","id":1,"result":{}}'` + "\n" +
+				`read line` + "\n" +
+				`read line` + "\n" +
+				`read line` + "\n",
+		},
+		{
+			name:   "thread resume",
+			method: "thread/resume",
+			body: "" +
+				`read line` + "\n" +
+				`echo '{"jsonrpc":"2.0","id":1,"result":{}}'` + "\n" +
+				`read line` + "\n" +
+				`read line` + "\n" +
+				`read line` + "\n",
+			opts: ExecOptions{ResumeSessionID: "thr-prior"},
+		},
+		{
+			name:   "turn start",
+			method: "turn/start",
+			body: "" +
+				`read line` + "\n" +
+				`echo '{"jsonrpc":"2.0","id":1,"result":{}}'` + "\n" +
+				`read line` + "\n" +
+				`read line` + "\n" +
+				`echo '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"thr-timeout"}}}'` + "\n" +
+				`read line` + "\n" +
+				`read line` + "\n",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			fakePath := writeFakeCodexAppServer(t, tc.body)
+			tc.opts.HandshakeTimeout = handshakeTimeout
+			tc.opts.SemanticInactivityTimeout = 5 * time.Second
+
+			started := time.Now()
+			result := executeFakeCodex(t, fakePath, tc.opts)
+			elapsed := time.Since(started)
+
+			if result.Status != "failed" {
+				t.Fatalf("expected failed, got status=%q error=%q", result.Status, result.Error)
+			}
+			for _, want := range []string{CodexHandshakeTimeoutMarker, tc.method, handshakeTimeout.String()} {
+				if !strings.Contains(result.Error, want) {
+					t.Fatalf("expected error to contain %q, got %q", want, result.Error)
+				}
+			}
+			// Proves the RPC was bounded rather than hanging to the 10s
+			// executeFakeCodex ceiling; the handshake fires at ~3s and
+			// shutdown is fast (closing stdin EOFs the fake).
+			if elapsed > 8*time.Second {
+				t.Fatalf("handshake timeout took %s, expected < 8s", elapsed)
+			}
+		})
+	}
+}
+
 func TestCodexExecuteTimesOutWhenTurnStopsAfterToolResult(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
@@ -2361,6 +2451,86 @@ func TestEnsureCodexMcpConfigTranslatesRemoteHTTPServer(t *testing.T) {
 	} {
 		if strings.Contains(got, unexpected) {
 			t.Fatalf("remote HTTP server should not render %q, got:\n%s", unexpected, got)
+		}
+	}
+}
+
+func TestEnsureCodexMcpConfigDropsInternalSelectors(t *testing.T) {
+	t.Parallel()
+
+	tmp := filepath.Join(t.TempDir(), "config.toml")
+	raw := json.RawMessage(`{"mcpServers":{"fetch":{"command":"uvx","args":["mcp-server-fetch"],"env":{"API_KEY":"secret"},"timeout":30,"tools":{"include":["kb_get"]},"prompts":{"include":["daily"]},"resources":{"include":["docs"]}}}}`)
+	if err := ensureCodexMcpConfig(tmp, raw, slog.Default()); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	data, err := os.ReadFile(tmp)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	got := string(data)
+
+	for _, want := range []string{
+		`[mcp_servers.fetch]`,
+		`command = "uvx"`,
+		`args = ["mcp-server-fetch"]`,
+		`env = { API_KEY = "secret" }`,
+		`timeout = 30`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in:\n%s", want, got)
+		}
+	}
+	for _, unexpected := range []string{
+		"\ntools = ",
+		"\nprompts = ",
+		"\nresources = ",
+		"kb_get",
+		"daily",
+		"docs",
+	} {
+		if strings.Contains(got, unexpected) {
+			t.Fatalf("internal MCP selector %q must not render into Codex config.toml:\n%s", unexpected, got)
+		}
+	}
+}
+
+func TestEnsureCodexMcpConfigDropsInternalSelectorsFromRemoteHTTPServer(t *testing.T) {
+	t.Parallel()
+
+	tmp := filepath.Join(t.TempDir(), "config.toml")
+	raw := json.RawMessage(`{"mcpServers":{"remote":{"type":"http","url":"https://mcp.example.test/session","headers":{"Authorization":"Bearer test-token"},"timeout":45,"tools":{"include":["kb_get"]},"prompts":{"include":["daily"]},"resources":{"include":["docs"]}}}}`)
+	if err := ensureCodexMcpConfig(tmp, raw, slog.Default()); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	data, err := os.ReadFile(tmp)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	got := string(data)
+
+	for _, want := range []string{
+		`[mcp_servers.remote]`,
+		`url = "https://mcp.example.test/session"`,
+		`http_headers = { Authorization = "Bearer test-token" }`,
+		`timeout = 45`,
+		`experimental_use_rmcp_client = true`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in:\n%s", want, got)
+		}
+	}
+	for _, unexpected := range []string{
+		"\ntools = ",
+		"\nprompts = ",
+		"\nresources = ",
+		"kb_get",
+		"daily",
+		"docs",
+		`type = "http"`,
+		"\nheaders = ",
+	} {
+		if strings.Contains(got, unexpected) {
+			t.Fatalf("internal or provider-incompatible key %q must not render into Codex config.toml:\n%s", unexpected, got)
 		}
 	}
 }

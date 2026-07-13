@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/issueguard"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -159,12 +160,14 @@ func (h *Handler) labelsByIssue(ctx context.Context, wsUUID pgtype.UUID, issueID
 	for _, r := range rows {
 		issueID := uuidToString(r.IssueID)
 		out[issueID] = append(out[issueID], LabelResponse{
-			ID:          uuidToString(r.ID),
-			WorkspaceID: uuidToString(r.WorkspaceID),
-			Name:        r.Name,
-			Color:       r.Color,
-			CreatedAt:   timestampToString(r.CreatedAt),
-			UpdatedAt:   timestampToString(r.UpdatedAt),
+			ID:           uuidToString(r.ID),
+			WorkspaceID:  uuidToString(r.WorkspaceID),
+			ResourceType: r.ResourceType,
+			Name:         r.Name,
+			Description:  r.Description,
+			Color:        r.Color,
+			CreatedAt:    timestampToString(r.CreatedAt),
+			UpdatedAt:    timestampToString(r.UpdatedAt),
 		})
 	}
 	return out
@@ -421,20 +424,34 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 	// --- WHERE clause ---
 	var whereParts []string
 
-	// Full phrase match: title, description, or comment
+	// Full phrase match: title, description, or comment.
+	//
+	// The comment EXISTS subquery is deliberately correlated on BOTH
+	// c.issue_id = i.id AND c.workspace_id = wsParam. The workspace_id
+	// filter is not strictly necessary for correctness (comment.workspace_id
+	// is FK-consistent with its issue's workspace), but it is critical for
+	// the planner. Without it, Postgres rewrites the correlated EXISTS
+	// into a hashed subplan that materializes every comment in the entire
+	// `comment` table matching the LIKE — for common tokens like "search"
+	// this can be hundreds of thousands of rows, blowing out work_mem into
+	// a lossy bitmap and taking 30+ seconds. With the workspace_id
+	// constant duplicated into the subquery, the hashed set collapses to
+	// this workspace's comments and the plan uses the supporting
+	// idx_comment_workspace (migration 135). See MUL-4059 EXPLAIN reports.
 	phraseMatch := fmt.Sprintf(
-		"(LOWER(i.title) LIKE %s OR LOWER(COALESCE(i.description, '')) LIKE %s OR EXISTS (SELECT 1 FROM comment c WHERE c.issue_id = i.id AND LOWER(c.content) LIKE %s))",
-		phraseContainsParam, phraseContainsParam, phraseContainsParam,
+		"(LOWER(i.title) LIKE %s OR LOWER(COALESCE(i.description, '')) LIKE %s OR EXISTS (SELECT 1 FROM comment c WHERE c.issue_id = i.id AND c.workspace_id = %s AND LOWER(c.content) LIKE %s))",
+		phraseContainsParam, phraseContainsParam, wsParam, phraseContainsParam,
 	)
 	whereParts = append(whereParts, phraseMatch)
 
-	// Multi-word AND match (each term must appear somewhere)
+	// Multi-word AND match (each term must appear somewhere). Same
+	// workspace_id-in-subquery contract as above.
 	if len(termContainsParams) > 1 {
 		var termConditions []string
 		for _, tp := range termContainsParams {
 			termConditions = append(termConditions, fmt.Sprintf(
-				"(LOWER(i.title) LIKE %s OR LOWER(COALESCE(i.description, '')) LIKE %s OR EXISTS (SELECT 1 FROM comment c WHERE c.issue_id = i.id AND LOWER(c.content) LIKE %s))",
-				tp, tp, tp,
+				"(LOWER(i.title) LIKE %s OR LOWER(COALESCE(i.description, '')) LIKE %s OR EXISTS (SELECT 1 FROM comment c WHERE c.issue_id = i.id AND c.workspace_id = %s AND LOWER(c.content) LIKE %s))",
+				tp, tp, wsParam, tp,
 			))
 		}
 		whereParts = append(whereParts, "("+strings.Join(termConditions, " AND ")+")")
@@ -492,8 +509,9 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 		rankCases = append(rankCases, fmt.Sprintf("WHEN (%s) THEN 6", strings.Join(descTerms, " AND ")))
 	}
 
-	// Tier 7: Comment contains phrase
-	rankCases = append(rankCases, fmt.Sprintf("WHEN EXISTS (SELECT 1 FROM comment c WHERE c.issue_id = i.id AND LOWER(c.content) LIKE %s) THEN 7", phraseContainsParam))
+	// Tier 7: Comment contains phrase. Same workspace_id-in-subquery
+	// contract as the WHERE clause; see the phraseMatch comment above.
+	rankCases = append(rankCases, fmt.Sprintf("WHEN EXISTS (SELECT 1 FROM comment c WHERE c.issue_id = i.id AND c.workspace_id = %s AND LOWER(c.content) LIKE %s) THEN 7", wsParam, phraseContainsParam))
 
 	// Tier 8: Comment matches all words (multi-word only)
 	if len(termContainsParams) > 1 {
@@ -501,7 +519,7 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 		for _, tp := range termContainsParams {
 			commentTerms = append(commentTerms, fmt.Sprintf("LOWER(c.content) LIKE %s", tp))
 		}
-		rankCases = append(rankCases, fmt.Sprintf("WHEN EXISTS (SELECT 1 FROM comment c WHERE c.issue_id = i.id AND (%s)) THEN 8", strings.Join(commentTerms, " AND ")))
+		rankCases = append(rankCases, fmt.Sprintf("WHEN EXISTS (SELECT 1 FROM comment c WHERE c.issue_id = i.id AND c.workspace_id = %s AND (%s)) THEN 8", wsParam, strings.Join(commentTerms, " AND ")))
 	}
 
 	rankExpr := "CASE " + strings.Join(rankCases, " ") + " ELSE 9 END"
@@ -548,12 +566,15 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 	// --- matched_comment_content subquery ---
 	// Always return matching comment content regardless of match_source,
 	// so frontend can display comment snippet alongside title/description matches.
+	// The c.workspace_id filter mirrors the WHERE clause: without it,
+	// the planner can pick a global comment scan that ignores workspace
+	// scoping.
 	commentSubquery := fmt.Sprintf(`COALESCE(
 		(SELECT c.content FROM comment c
-		 WHERE c.issue_id = i.id AND LOWER(c.content) LIKE %s
+		 WHERE c.issue_id = i.id AND c.workspace_id = %s AND LOWER(c.content) LIKE %s
 		 ORDER BY c.created_at DESC LIMIT 1),
 		''
-	)`, phraseContainsParam)
+	)`, wsParam, phraseContainsParam)
 
 	if len(termContainsParams) > 1 {
 		var commentTerms []string
@@ -562,10 +583,10 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 		}
 		commentSubquery = fmt.Sprintf(`COALESCE(
 			(SELECT c.content FROM comment c
-			 WHERE c.issue_id = i.id AND (LOWER(c.content) LIKE %s OR (%s))
+			 WHERE c.issue_id = i.id AND c.workspace_id = %s AND (LOWER(c.content) LIKE %s OR (%s))
 			 ORDER BY c.created_at DESC LIMIT 1),
 			''
-		)`, phraseContainsParam, strings.Join(commentTerms, " AND "))
+		)`, wsParam, phraseContainsParam, strings.Join(commentTerms, " AND "))
 	}
 
 	limitParam := nextArg(nil)  // placeholder
@@ -636,50 +657,56 @@ func (h *Handler) SearchIssues(w http.ResponseWriter, r *http.Request) {
 	args[len(args)-2] = limit
 	args[len(args)-1] = offset
 
-	rows, err := h.DB.Query(ctx, sqlQuery, args...)
-	if err != nil {
-		slog.Warn("search issues failed", "error", err, "workspace_id", workspaceID, "query", q)
-		writeError(w, http.StatusInternalServerError, "failed to search issues")
-		return
-	}
-	defer rows.Close()
-
 	var results []searchResult
-	for rows.Next() {
-		var sr searchResult
-		if err := rows.Scan(
-			&sr.issue.ID,
-			&sr.issue.WorkspaceID,
-			&sr.issue.Title,
-			&sr.issue.Description,
-			&sr.issue.Status,
-			&sr.issue.Priority,
-			&sr.issue.AssigneeType,
-			&sr.issue.AssigneeID,
-			&sr.issue.CreatorType,
-			&sr.issue.CreatorID,
-			&sr.issue.ParentIssueID,
-			&sr.issue.AcceptanceCriteria,
-			&sr.issue.ContextRefs,
-			&sr.issue.Position,
-			&sr.issue.StartDate,
-			&sr.issue.DueDate,
-			&sr.issue.CreatedAt,
-			&sr.issue.UpdatedAt,
-			&sr.issue.Number,
-			&sr.issue.ProjectID,
-			&sr.totalCount,
-			&sr.matchSource,
-			&sr.matchedCommentContent,
-		); err != nil {
-			slog.Warn("search issues scan failed", "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to search issues")
+	err := runSearchQuery(ctx, h.TxStarter, sqlQuery, args, func(rows pgx.Rows) error {
+		for rows.Next() {
+			var sr searchResult
+			if err := rows.Scan(
+				&sr.issue.ID,
+				&sr.issue.WorkspaceID,
+				&sr.issue.Title,
+				&sr.issue.Description,
+				&sr.issue.Status,
+				&sr.issue.Priority,
+				&sr.issue.AssigneeType,
+				&sr.issue.AssigneeID,
+				&sr.issue.CreatorType,
+				&sr.issue.CreatorID,
+				&sr.issue.ParentIssueID,
+				&sr.issue.AcceptanceCriteria,
+				&sr.issue.ContextRefs,
+				&sr.issue.Position,
+				&sr.issue.StartDate,
+				&sr.issue.DueDate,
+				&sr.issue.CreatedAt,
+				&sr.issue.UpdatedAt,
+				&sr.issue.Number,
+				&sr.issue.ProjectID,
+				&sr.totalCount,
+				&sr.matchSource,
+				&sr.matchedCommentContent,
+			); err != nil {
+				return fmt.Errorf("scan: %w", err)
+			}
+			results = append(results, sr)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		// Statement-timeout surfaces as SQLSTATE 57014. Return a 503
+		// so the frontend can distinguish a timeout ("try a more
+		// specific query") from a generic 500. This is the fail-fast
+		// path when GIN search indexes are absent or the database is
+		// overloaded; see runSearchQuery header for context.
+		if isSearchStatementTimeout(err) {
+			slog.Warn("search issues timed out",
+				"workspace_id", workspaceID,
+				"query", q,
+				"timeout", searchStatementTimeout)
+			writeError(w, http.StatusServiceUnavailable, "search timed out; please refine your query or try again")
 			return
 		}
-		results = append(results, sr)
-	}
-	if err := rows.Err(); err != nil {
-		slog.Warn("search issues rows error", "error", err)
+		slog.Warn("search issues failed", "error", err, "workspace_id", workspaceID, "query", q)
 		writeError(w, http.StatusInternalServerError, "failed to search issues")
 		return
 	}
@@ -998,7 +1025,7 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 
 	query := fmt.Sprintf(`SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
        i.assignee_type, i.assignee_id, i.creator_type, i.creator_id,
-       i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata
+       i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata, i.stage
 FROM issue i
 WHERE %s
 ORDER BY %s
@@ -1035,6 +1062,7 @@ LIMIT %s OFFSET %s`, whereSql, orderBy, limitRef, offsetRef)
 			&row.Number,
 			&row.ProjectID,
 			&row.Metadata,
+			&row.Stage,
 		); err != nil {
 			slog.Warn("ListIssues scan failed", "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to list issues")
@@ -1494,8 +1522,8 @@ WITH ranked AS (
 	SELECT
 		i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
 		i.assignee_type, i.assignee_id, i.creator_type, i.creator_id,
-		i.parent_issue_id, i.position, i.due_date, i.created_at, i.updated_at,
-		i.number, i.project_id, i.metadata,
+		i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at,
+		i.number, i.project_id, i.metadata, i.stage,
 		COUNT(*) OVER (PARTITION BY i.assignee_type, i.assignee_id) AS group_total,
 		ROW_NUMBER() OVER (
 			PARTITION BY i.assignee_type, i.assignee_id
@@ -1507,8 +1535,8 @@ WITH ranked AS (
 SELECT
 	id, workspace_id, title, description, status, priority,
 	assignee_type, assignee_id, creator_type, creator_id,
-	parent_issue_id, position, due_date, created_at, updated_at,
-	number, project_id, metadata, group_total
+	parent_issue_id, position, start_date, due_date, created_at, updated_at,
+	number, project_id, metadata, stage, group_total
 FROM ranked
 WHERE rn > %s AND rn <= %s + %s
 ORDER BY
@@ -1546,12 +1574,14 @@ ORDER BY
 			&row.CreatorID,
 			&row.ParentIssueID,
 			&row.Position,
+			&row.StartDate,
 			&row.DueDate,
 			&row.CreatedAt,
 			&row.UpdatedAt,
 			&row.Number,
 			&row.ProjectID,
 			&row.Metadata,
+			&row.Stage,
 			&row.GroupTotal,
 		); err != nil {
 			slog.Warn("ListGroupedIssues scan failed", "error", err)
@@ -2224,6 +2254,31 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		originType = pgtype.Text{String: *req.OriginType, Valid: true}
 		originID = oid
+	} else if creatorType == "agent" {
+		// MUL-4305: an agent creating an issue via the ordinary create path
+		// carries no explicit origin, which historically left the new issue
+		// unattributed. Any run later derived from it (agent assignment,
+		// squad-leader trigger) then lost the top-of-chain human originator,
+		// so A2A @-mentions from those runs failed the canInvokeAgent gate
+		// against private agents. Stamp the acting task as the issue's origin
+		// so resolveOriginatorForIssueTask can inherit its originator — the
+		// same trick CreateComment uses with comment.source_task_id (MUL-4015).
+		//
+		// The task id is taken from the SERVER-trusted X-Task-ID: resolveActor
+		// only returns creatorType=="agent" when either X-Actor-Source=task_token
+		// (the auth middleware bound X-Agent-ID/X-Task-ID from the mat_ token and
+		// stripped any client value) or the X-Agent-ID/X-Task-ID pair was
+		// validated against the DB. A member-forged X-Task-ID never reaches here
+		// because it would have resolved to creatorType=="member". We still
+		// re-check the task belongs to the acting agent before trusting it.
+		if taskIDHeader := r.Header.Get("X-Task-ID"); taskIDHeader != "" {
+			if taskUUID, perr := util.ParseUUID(taskIDHeader); perr == nil {
+				if task, terr := h.Queries.GetAgentTask(r.Context(), taskUUID); terr == nil && uuidToString(task.AgentID) == actualCreatorID {
+					originType = pgtype.Text{String: "agent_create", Valid: true}
+					originID = taskUUID
+				}
+			}
+		}
 	}
 
 	// Prefix is workspace-level; pre-compute once so both the broadcast
@@ -2588,11 +2643,20 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	// Reconcile the task queue. Whether this write starts an agent run — and
 	// for whom (agent assignee or squad leader) — is decided by the single
 	// WillEnqueueRun predicate, shared verbatim with the preview endpoint so
-	// the two never drift (MUL-3375). Cancellation on reassignment is a
-	// separate side effect and always runs, independent of the run decision.
-	if assigneeChanged {
-		h.TaskService.CancelTasksForIssue(r.Context(), issue.ID)
-	}
+	// the two never drift (MUL-3375).
+	//
+	// A reassignment intentionally does NOT cancel existing tasks on the issue
+	// (#4963 / MUL-4113). The previous "cancel every active task on the issue"
+	// was too coarse: it silently dropped unrelated in-flight work (a
+	// mention-triggered run for another agent, a squad task) with no requeue,
+	// and it self-cancelled a run that reassigned the issue from inside itself.
+	// Ownership handoff no longer implies interruption; the new assignee's run,
+	// if any, is enqueued by WillEnqueueRun below and runs alongside whatever
+	// was already in flight. No status change — not even → cancelled — cancels
+	// active tasks: a user clicking "cancel" on an issue has no expectation that
+	// it stops in-flight agent runs, so that implicit coupling is gone
+	// (MUL-4465). Deleting an issue still cancels its tasks (see DeleteIssue),
+	// because the tasks' owning issue ceases to exist.
 	if trigger, ok := h.IssueService.WillEnqueueRun(r.Context(),
 		service.IssueTriggerInput{
 			Issue:           issue,
@@ -2605,20 +2669,13 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		h.dispatchIssueRun(r.Context(), issue, trigger, actorType, actorID, req.HandoffNote)
 	}
 
-	// Cancel active tasks when the issue is cancelled by a user.
-	// This is distinct from agent-managed status transitions — cancellation
-	// is a user-initiated terminal action that should stop execution.
-	if statusChanged && issue.Status == "cancelled" {
-		h.TaskService.CancelTasksForIssue(r.Context(), issue.ID)
-	}
-
 	// Platform-driven parent notification: when this issue transitions into
 	// `done` and has a parent, post a top-level system comment on the parent
 	// (MUL-2538 — replaces the agent-prompt rule that caused self-mention
 	// loops in PR #2918). The helper guards on transition + parent state and
 	// fails best-effort.
 	if statusChanged {
-		h.notifyParentOfChildDone(r.Context(), prevIssue, issue, actorType, actorID)
+		h.notifyParentOfChildDone(r.Context(), prevIssue, issue)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -2913,6 +2970,10 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated := 0
+	// Children that transitioned into a terminal status this batch, collected so
+	// the parent/stage notification is evaluated once against the final state
+	// after the loop (MUL-4155) rather than per-child mid-batch.
+	var childDoneCompleted []db.Issue
 	for _, issueID := range req.IssueIDs {
 		issueUUID, err := util.ParseUUID(issueID)
 		if err != nil {
@@ -3088,9 +3149,9 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			"project_changed":  projectChanged,
 		})
 
-		if assigneeChanged {
-			h.TaskService.CancelTasksForIssue(r.Context(), issue.ID)
-		}
+		// Reassignment does not cancel existing tasks (#4963 / MUL-4113) —
+		// mirrors UpdateIssue. See that handler for the rationale.
+		//
 		// Same single predicate as UpdateIssue — batch must not grow its own
 		// copy of the enqueue rule (the historical source of four-entry-point
 		// drift, MUL-3375). suppress_run applies batch-wide.
@@ -3106,19 +3167,30 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			h.dispatchIssueRun(r.Context(), issue, trigger, actorType, actorID, req.Updates.HandoffNote)
 		}
 
-		// Cancel active tasks when the issue is cancelled by a user.
-		if statusChanged && issue.Status == "cancelled" {
-			h.TaskService.CancelTasksForIssue(r.Context(), issue.ID)
-		}
+		// No status change — not even → cancelled — cancels active tasks here,
+		// mirroring UpdateIssue (MUL-4465). See that handler for the rationale.
 
 		// Platform-driven parent notification, mirrored from UpdateIssue
-		// (MUL-2538). Best-effort; failure does not abort the batch.
-		if statusChanged {
-			h.notifyParentOfChildDone(r.Context(), prevIssue, issue, actorType, actorID)
+		// (MUL-2538) but DEFERRED to after the loop. Evaluating the stage
+		// barrier here, per-child, would read a mid-batch sibling snapshot and
+		// fire a stale "advance Stage N+1" wake when one batch closes several
+		// stages at once (MUL-4155). Collect the terminal transitions and let
+		// notifyParentsOfBatchChildDone below evaluate each parent once against
+		// the batch's final committed state. Same transition guard as
+		// notifyParentOfChildDone: a non-terminal -> terminal move on a child.
+		if statusChanged && issue.ParentIssueID.Valid &&
+			!isTerminalChildStatus(prevIssue.Status) && isTerminalChildStatus(issue.Status) {
+			childDoneCompleted = append(childDoneCompleted, issue)
 		}
 
 		updated++
 	}
+
+	// Aggregate parent/stage notification over the whole batch's final state so
+	// each affected parent gets at most one accurate comment + wake, independent
+	// of issue_ids order (MUL-4155). Best-effort; failure does not abort the
+	// batch. Single-issue UpdateIssue is unchanged and still notifies inline.
+	h.notifyParentsOfBatchChildDone(r.Context(), childDoneCompleted)
 
 	slog.Info("batch update issues", append(logger.RequestAttrs(r), "count", updated)...)
 	writeJSON(w, http.StatusOK, map[string]any{"updated": updated})

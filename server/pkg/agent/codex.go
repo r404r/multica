@@ -2,7 +2,6 @@ package agent
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,6 +39,7 @@ const (
 	codexStderrTailBytes                   = 2048
 	defaultCodexSemanticInactivityTimeout  = 10 * time.Minute
 	defaultCodexFirstTurnNoProgressTimeout = 30 * time.Second
+	defaultCodexHandshakeTimeout           = 30 * time.Second
 	codexVersionDiagnosticTimeout          = 2 * time.Second
 	// codexGracefulShutdownTimeout bounds how long the lifecycle goroutine
 	// waits for codex to exit on its own after stdin is closed, before forcing
@@ -73,6 +73,10 @@ const CodexSemanticInactivityMarker = "codex semantic inactivity timeout"
 // CodexFirstTurnNoProgressMarker identifies the app-server failure mode where
 // Codex accepts a turn and then never emits any item, completion, or error.
 const CodexFirstTurnNoProgressMarker = "codex app-server no progress timeout"
+
+// CodexHandshakeTimeoutMarker identifies a Codex app-server startup RPC that
+// did not answer within the bounded handshake window.
+const CodexHandshakeTimeoutMarker = "codex app-server handshake timeout"
 
 const codexModelCatalogRefreshTimeoutSignal = "failed to refresh available models: timeout waiting for child process to exit"
 
@@ -128,14 +132,7 @@ func buildCodexArgs(opts ExecOptions, logger *slog.Logger) []string {
 // managed set — strict mode, no global fallback); only SQL NULL or the
 // literal JSON `null` count as absent (CLI default).
 func hasManagedCodexMcpConfig(raw json.RawMessage) bool {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return false
-	}
-	if bytes.Equal(trimmed, []byte("null")) {
-		return false
-	}
-	return true
+	return hasManagedMcpConfig(raw)
 }
 
 // codexManagedMcpConfigKeyRe matches the daemon-managed config namespace
@@ -380,15 +377,24 @@ func renderCodexMcpServersBlock(raw json.RawMessage) (string, bool, error) {
 
 func normalizeCodexMcpServerConfig(server map[string]any) map[string]any {
 	if !isCodexRemoteMcpServer(server) {
-		return server
+		normalized := make(map[string]any, len(server))
+		for k, v := range server {
+			if isMulticaMcpSelectorKey(k) {
+				continue
+			}
+			normalized[k] = v
+		}
+		return normalized
 	}
 
 	normalized := make(map[string]any, len(server)+1)
 	for k, v := range server {
-		switch k {
-		case "type":
+		switch {
+		case isMulticaMcpSelectorKey(k):
 			continue
-		case "headers":
+		case k == "type":
+			continue
+		case k == "headers":
 			if _, ok := server["http_headers"]; !ok {
 				normalized["http_headers"] = v
 			}
@@ -398,6 +404,15 @@ func normalizeCodexMcpServerConfig(server map[string]any) map[string]any {
 	}
 	normalized["experimental_use_rmcp_client"] = true
 	return normalized
+}
+
+func isMulticaMcpSelectorKey(k string) bool {
+	switch k {
+	case "tools", "prompts", "resources":
+		return true
+	default:
+		return false
+	}
 }
 
 func isCodexRemoteMcpServer(server map[string]any) bool {
@@ -564,6 +579,10 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 	if semanticInactivityTimeout == 0 {
 		semanticInactivityTimeout = defaultCodexSemanticInactivityTimeout
 	}
+	handshakeTimeout := opts.HandshakeTimeout
+	if handshakeTimeout <= 0 {
+		handshakeTimeout = defaultCodexHandshakeTimeout
+	}
 	runCtx, cancel := runContext(ctx, timeout)
 
 	// Materialise the agent's MCP config into the per-task
@@ -664,6 +683,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		stdin:                stdin,
 		pending:              make(map[int]*pendingRPC),
 		processDone:          make(chan struct{}),
+		handshakeTimeout:     handshakeTimeout,
 		notificationProtocol: "unknown",
 		onMessage: func(msg Message) {
 			logCodexAgentMessage(b.cfg.Logger, msg)
@@ -1343,6 +1363,7 @@ type codexClient struct {
 	pending            map[int]*pendingRPC
 	processDone        chan struct{}
 	processErr         error
+	handshakeTimeout   time.Duration
 	threadID           string
 	turnID             string
 	onMessage          func(Message)
@@ -1387,10 +1408,48 @@ type rpcResult struct {
 	err    error
 }
 
+type codexHandshakeTimeoutError struct {
+	Method  string
+	Timeout time.Duration
+}
+
+func (e *codexHandshakeTimeoutError) Error() string {
+	return fmt.Sprintf("%s: %s did not respond after %s", CodexHandshakeTimeoutMarker, e.Method, e.Timeout)
+}
+
+func (e *codexHandshakeTimeoutError) Unwrap() error {
+	return context.DeadlineExceeded
+}
+
+func isCodexHandshakeRPC(method string) bool {
+	switch method {
+	case "initialize", "thread/start", "thread/resume", "thread/name/set", "turn/start":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexRequestContextError(ctx context.Context) error {
+	var handshakeErr *codexHandshakeTimeoutError
+	if errors.As(context.Cause(ctx), &handshakeErr) {
+		return handshakeErr
+	}
+	return ctx.Err()
+}
+
 func (c *codexClient) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	requestCtx := ctx
+	cancelRequest := func() {}
+	if c.handshakeTimeout > 0 && isCodexHandshakeRPC(method) {
+		timeoutErr := &codexHandshakeTimeoutError{Method: method, Timeout: c.handshakeTimeout}
+		requestCtx, cancelRequest = context.WithTimeoutCause(ctx, c.handshakeTimeout, timeoutErr)
+	}
+	defer cancelRequest()
+
 	c.mu.Lock()
 	if c.processErr != nil {
 		err := c.processErr
@@ -1448,18 +1507,18 @@ func (c *codexClient) request(ctx context.Context, method string, params any) (j
 		delete(c.pending, id)
 		err := c.processErr
 		c.mu.Unlock()
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+		if requestCtx.Err() != nil {
+			return nil, codexRequestContextError(requestCtx)
 		}
 		if err == nil {
 			err = errCodexProcessExited
 		}
 		return nil, err
-	case <-ctx.Done():
+	case <-requestCtx.Done():
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
-		return nil, ctx.Err()
+		return nil, codexRequestContextError(requestCtx)
 	}
 }
 
@@ -1536,6 +1595,10 @@ func isCodexTransportError(err error) bool {
 		return false
 	}
 	if errors.Is(err, errCodexProcessExited) {
+		return true
+	}
+	var handshakeErr *codexHandshakeTimeoutError
+	if errors.As(err, &handshakeErr) {
 		return true
 	}
 	return strings.HasPrefix(err.Error(), "write ")
