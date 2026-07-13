@@ -32,6 +32,7 @@ const mockVerifyCode = vi.hoisted(() => vi.fn());
 const mockVerifyTOTPLogin = vi.hoisted(() => vi.fn());
 const mockApiListWorkspaces = vi.hoisted(() => vi.fn());
 const mockApiVerifyCode = vi.hoisted(() => vi.fn());
+const mockApiLoginWithTOTP = vi.hoisted(() => vi.fn());
 const mockApiSetToken = vi.hoisted(() => vi.fn());
 const mockApiGetMe = vi.hoisted(() => vi.fn());
 const mockApiIssueCliToken = vi.hoisted(() => vi.fn());
@@ -75,6 +76,7 @@ vi.mock("@multica/core/api", () => ({
   api: {
     listWorkspaces: mockApiListWorkspaces,
     verifyCode: mockApiVerifyCode,
+    loginWithTOTP: mockApiLoginWithTOTP,
     setToken: mockApiSetToken,
     getMe: mockApiGetMe,
     issueCliToken: mockApiIssueCliToken,
@@ -628,6 +630,44 @@ describe("LoginPage", () => {
     // Normal verifyCode should NOT be called in CLI path
     expect(mockVerifyCode).not.toHaveBeenCalled();
     // onSuccess should NOT be called in CLI path — redirect handles it
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it("CLI TOTP verification redirects to callback URL", async () => {
+    mockTotpState.totpSupported = true;
+    mockApiLoginWithTOTP.mockResolvedValueOnce({ token: "totp-jwt-token" });
+    const onTokenObtained = vi.fn();
+
+    renderWithI18n(
+      <LoginPage
+        onSuccess={onSuccess}
+        onTokenObtained={onTokenObtained}
+        cliCallback={{ url: "http://localhost:9876/callback", state: "totp-state" }}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/email/i), "cli@example.com");
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+    await user.click(
+      await screen.findByRole("button", { name: /use authenticator app/i }),
+    );
+    await user.type(getOTPInput(), "123456");
+    await user.click(screen.getByRole("button", { name: /^verify$/i }));
+
+    await waitFor(() => {
+      expect(mockApiLoginWithTOTP).toHaveBeenCalledWith(
+        "cli@example.com",
+        "123456",
+      );
+      expect(mockApiSetToken).toHaveBeenCalledWith("totp-jwt-token");
+      expect(onTokenObtained).toHaveBeenCalled();
+      expect(window.location.href).toContain(
+        "http://localhost:9876/callback?token=totp-jwt-token&state=totp-state",
+      );
+    });
+
+    expect(mockVerifyTOTPLogin).not.toHaveBeenCalled();
     expect(onSuccess).not.toHaveBeenCalled();
   });
 
