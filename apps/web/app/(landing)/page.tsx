@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { MulticaLanding } from "@/features/landing/components/multica-landing";
+import Link from "next/link";
+import { buttonVariants } from "@multica/ui/components/ui/button";
 import { RedirectIfAuthenticated } from "@/features/landing/components/redirect-if-authenticated";
 
 export const metadata: Metadata = {
@@ -23,7 +24,11 @@ export default function LandingPage() {
   return (
     <>
       <RedirectIfAuthenticated />
-      <MulticaLanding />
+      <main className="flex min-h-screen items-center justify-center bg-background">
+        <Link href="/login" className={buttonVariants({ size: "lg" })}>
+          Login
+        </Link>
+      </main>
     </>
   );
 }
