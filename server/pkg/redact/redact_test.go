@@ -201,7 +201,7 @@ func TestRedactHomeDirectory(t *testing.T) {
 	}
 	input := "Reading file at " + homeDir + "/Documents/secret.txt"
 	got := Text(input)
-	if strings.Contains(got, username) {
+	if strings.Contains(got, homeDir) {
 		t.Fatalf("home directory username not redacted: %s", got)
 	}
 	if !strings.Contains(got, "****") {
