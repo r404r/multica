@@ -23,6 +23,10 @@ interface ConfigState {
   // advertise this field degrade gracefully (no TOTP UI shown).
   totpSupported: boolean;
   featureFlags: Record<string, boolean>;
+  // The running API build version, surfaced in the Help popover so
+  // self-hosted operators can confirm what's deployed. Empty for dev builds
+  // or servers older than this feature.
+  serverVersion: string;
   setCdnConfig: (config: { cdnDomain: string; cdnSigned?: boolean }) => void;
   setAuthConfig: (config: {
     allowSignup: boolean;
@@ -36,6 +40,7 @@ interface ConfigState {
     daemonAppUrl?: string;
   }) => void;
   setFeatureFlags: (flags?: Record<string, boolean>) => void;
+  setServerVersion: (version?: string) => void;
 }
 
 export const configStore = createStore<ConfigState>((set) => ({
@@ -49,12 +54,14 @@ export const configStore = createStore<ConfigState>((set) => ({
   emailConfigured: false,
   totpSupported: false,
   featureFlags: {},
+  serverVersion: "",
   setCdnConfig: ({ cdnDomain, cdnSigned = false }) => set({ cdnDomain, cdnSigned }),
   setAuthConfig: ({ allowSignup, googleClientId = "", workspaceCreationDisabled = false, emailConfigured = false, totpSupported = false }) =>
     set({ allowSignup, googleClientId, workspaceCreationDisabled, emailConfigured, totpSupported }),
   setDaemonConfig: ({ daemonServerUrl = "", daemonAppUrl = "" }) =>
     set({ daemonServerUrl, daemonAppUrl }),
   setFeatureFlags: (flags = {}) => set({ featureFlags: { ...flags } }),
+  setServerVersion: (version = "") => set({ serverVersion: version }),
 }));
 
 export function useConfigStore(): ConfigState;

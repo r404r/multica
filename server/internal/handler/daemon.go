@@ -1101,8 +1101,9 @@ func (h *Handler) processHeartbeat(ctx context.Context, rt db.AgentRuntime, supp
 	slog.Debug("daemon heartbeat", "runtime_id", runtimeID)
 
 	ack := &protocol.DaemonHeartbeatAckPayload{
-		RuntimeID: runtimeID,
-		Status:    "ok",
+		RuntimeID:          runtimeID,
+		Status:             "ok",
+		ServerCapabilities: []string{protocol.DaemonCapabilityRPCV1},
 	}
 
 	probeUpdateCtx, cancelProbeUpdate := context.WithTimeout(ctx, heartbeatHasPendingTimeout)
@@ -1296,7 +1297,9 @@ func logClaimEndpointSlow(runtimeID, outcome string, start time.Time, authMs, cl
 	)
 }
 
-func requestHasDaemonCapability(r *http.Request, capability string) bool {
+// requestHasClientCapability reports whether the caller advertised a capability
+// in X-Client-Capabilities. Daemons and app clients share the header.
+func requestHasClientCapability(r *http.Request, capability string) bool {
 	for _, part := range strings.Split(r.Header.Get("X-Client-Capabilities"), ",") {
 		if strings.TrimSpace(part) == capability {
 			return true
@@ -1586,7 +1589,7 @@ type claimBuildFailure struct {
 func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQueue, runtime db.AgentRuntime, runtimeID, runtimeWorkspaceID string) (resp AgentTaskResponse, deliveredCommentIDs []pgtype.UUID, agentSkillCount, builtinSkillCount int, failure *claimBuildFailure) {
 	// Build response with fresh agent data (name + skills + custom_env + custom_args).
 	resp = taskToResponse(*task, runtimeWorkspaceID)
-	supportsCoalescedComments := requestHasDaemonCapability(r, protocol.DaemonCapabilityCoalescedCommentsV1)
+	supportsCoalescedComments := requestHasClientCapability(r, protocol.DaemonCapabilityCoalescedCommentsV1)
 	// Empty-but-non-nil so pgx persists '{}' rather than NULL for tasks without
 	// comment input. Comment tasks replace this with the ids actually embedded
 	// in the capability-aware response built below.
@@ -1596,7 +1599,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		resp.ConnectedApps = parseRuntimeConnectedAppsForClaim(task.RuntimeConnectedApps, task.ID)
 	}
 	if agent, err := h.Queries.GetAgent(r.Context(), task.AgentID); err == nil {
-		useSkillRefs := requestHasDaemonCapability(r, protocol.DaemonCapabilitySkillBundlesV1)
+		useSkillRefs := requestHasClientCapability(r, protocol.DaemonCapabilitySkillBundlesV1)
 		var customEnv map[string]string
 		if agent.CustomEnv != nil {
 			if err := json.Unmarshal(agent.CustomEnv, &customEnv); err != nil {
@@ -1962,24 +1965,49 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			resp.TriggerCommentContent = "The newest triggering comment is no longer available. Address every earlier comment included below."
 		}
 
-		// Look up the prior session for this (agent, issue) pair so the daemon
-		// can resume the Claude Code conversation context.
-		//
-		// Skip all prior state when the task was flagged as a manual rerun:
-		// the user just judged the prior output bad, so the daemon must start a
-		// fresh agent session in a fresh workdir instead of resuming anything
-		// from the same conversation that produced that output.
-		if !task.ForceFreshSession {
+		// Resolve the prior agent session / workdir to resume.
+		if task.RerunOfTaskID.Valid {
+			// Manual retry: resume precisely from the source task the user
+			// clicked, NOT the most-recent (agent, issue) row — a parallel task
+			// on the same issue must never hijack the resume (MUL-4869). The
+			// workdir is ALWAYS reused when it still exists; the session is
+			// resumed only when the source failure did not poison the
+			// conversation AND the source ran on this runtime.
+			//
+			// Resume-safety is computed HERE from the source task, not read off
+			// task.ForceFreshSession: RerunIssue pins that flag to true so an OLD
+			// claim handler mid rolling-deploy degrades to a clean start instead
+			// of resuming a different execution via the (agent, issue) lookup.
+			// service.ResumeUnsafeFailure mirrors GetLastTaskSession, including
+			// its 400/invalid_request_error text defense for legacy /
+			// mis-classified rows that the exact-source path would otherwise miss.
+			//
+			// When the source workdir is gone (GC'd), absent on this runtime, or
+			// was never recorded (failed too early), execenv.Reuse falls back to a
+			// fresh Prepare and gateResumeToReusedWorkdir drops the now-unusable
+			// session — reuse is best-effort, never a silent swap onto a stale
+			// directory. PriorWorkDir is offered regardless of runtime (a shared
+			// mount may still resolve it); only the per-cwd session is
+			// runtime-gated.
+			if src, err := h.Queries.GetAgentTask(r.Context(), task.RerunOfTaskID); err == nil {
+				if src.WorkDir.Valid {
+					resp.PriorWorkDir = src.WorkDir.String
+				}
+				if !service.ResumeUnsafeFailure(src.FailureReason.String, src.Error.String) &&
+					src.SessionID.Valid && src.RuntimeID == task.RuntimeID {
+					resp.PriorSessionID = src.SessionID.String
+				}
+			}
+		} else if !task.ForceFreshSession {
+			// Non-rerun follow-up on the same issue: resume the most recent
+			// (agent, issue) session so the agent keeps the issue's conversation
+			// context across turns. The "Focus on THIS comment" guard in
+			// prompt.go defends against inheriting the prior turn's "Done."
+			// marker, and GetLastTaskSession already excludes poisoned sessions.
 			if prior, err := h.Queries.GetLastTaskSession(r.Context(), db.GetLastTaskSessionParams{
 				AgentID: task.AgentID,
 				IssueID: task.IssueID,
 			}); err == nil && prior.SessionID.Valid {
-				// Resume the prior session when it ran on the same runtime —
-				// including comment-triggered follow-ups, so the agent keeps the
-				// issue's conversation context across turns. The "Focus on THIS
-				// comment" guard in prompt.go defends against inheriting the prior
-				// turn's "Done." marker, and GetLastTaskSession already excludes
-				// poisoned sessions.
 				if prior.RuntimeID == task.RuntimeID {
 					resp.PriorSessionID = prior.SessionID.String
 				}
@@ -2983,12 +3011,21 @@ func (h *Handler) reconcileCommentsOnCompletion(ctx context.Context, task *db.Ag
 		actorType := c.AuthorType
 		actorID := uuidToString(c.AuthorID)
 		originatorUserID := actorID
+		var delegationAuthority string
 		if actorType != "member" {
 			originatorUserID = uuidToString(h.TaskService.ResolveOriginatorFromTriggerComment(ctx, issue.WorkspaceID, c.ID))
+			// MUL-4857: this is the deferred replay of an already-accepted delegation
+			// (e.g. the mentioned target was busy at create time). Restore the SAME
+			// verified authorization context from the comment's stored source_task_id,
+			// so an unattributed autopilot delegation's follow-up still fires once the
+			// busy target frees up. The source_task_id is re-stamped on edit, so this
+			// tracks the current content's authoring action, not a stale one.
+			delegationAuthority = h.autopilotDelegationAuthorityFromComment(ctx, issue, c)
 		}
-		triggers := h.computeCommentAgentTriggers(ctx, issue, c.Content, parentComment, actorType, actorID, commentTriggerComputeOptions{
-			ExcludeTriggerCommentID: c.ID,
-			OriginatorUserID:        originatorUserID,
+		triggers, _ := h.computeCommentAgentTriggers(ctx, issue, c.Content, parentComment, actorType, actorID, commentTriggerComputeOptions{
+			ExcludeTriggerCommentID:            c.ID,
+			OriginatorUserID:                   originatorUserID,
+			AutopilotDelegationAuthorityUserID: delegationAuthority,
 		})
 		// For an AGENT author, compensate ONLY explicit @agent/@squad mentions.
 		// computeCommentAgentTriggers can also return the assigned-squad-leader
@@ -3483,6 +3520,20 @@ func (h *Handler) ReportTaskMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// AckTaskCancelled receives the daemon's acknowledgement that it observed a
+// task cancellation and finished flushing the transcript. Settles the chat
+// finalization that CancelTaskWithResult deferred for a started-but-empty
+// transcript (#5219); idempotent when nothing was deferred.
+func (h *Handler) AckTaskCancelled(w http.ResponseWriter, r *http.Request) {
+	taskID := chi.URLParam(r, "taskId")
+	task, ok := h.requireDaemonTaskAccess(w, r, taskID)
+	if !ok {
+		return
+	}
+	h.TaskService.FinalizeDeferredCancelledChat(r.Context(), task.ID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func taskMessageToPayload(m db.TaskMessage, taskID, issueID string) protocol.TaskMessagePayload {
 	var input map[string]any
 	if m.Input != nil {
@@ -3566,6 +3617,8 @@ func (h *Handler) GetActiveTaskForIssue(w http.ResponseWriter, r *http.Request) 
 	for i, t := range tasks {
 		resp[i] = taskToResponse(t, workspaceID)
 	}
+	// Same issue-facing attribution surface as ListTasksByIssue — hydrate names.
+	h.hydrateTaskAttributions(r.Context(), attributionsOf(resp))
 
 	writeJSON(w, http.StatusOK, map[string]any{"tasks": resp})
 }
@@ -3596,7 +3649,11 @@ func (h *Handler) CancelTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("task cancelled by user", "task_id", taskID, "issue_id", uuidToString(task.IssueID))
-	writeJSON(w, http.StatusOK, taskToResponse(*task, uuidToString(issue.WorkspaceID)))
+	resp := taskToResponse(*task, uuidToString(issue.WorkspaceID))
+	// Keep this issue-scoped surface consistent with the list endpoints so a
+	// cancelled row keeps its resolved "on behalf of" name in the UI.
+	h.hydrateTaskAttributions(r.Context(), []*TaskAttribution{resp.Attribution})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ListTasksByIssue returns all tasks (any status) for an issue — used for execution history.
@@ -3618,6 +3675,10 @@ func (h *Handler) ListTasksByIssue(w http.ResponseWriter, r *http.Request) {
 	for i, t := range tasks {
 		resp[i] = taskToResponse(t, workspaceID)
 	}
+	// Execution-log rows render the "on behalf of <member>" badge, so this
+	// issue-facing surface must resolve initiator/originator names (departed-safe,
+	// one batch) — otherwise the badge falls back to "someone" on issue detail.
+	h.hydrateTaskAttributions(r.Context(), attributionsOf(resp))
 
 	writeJSON(w, http.StatusOK, resp)
 }
