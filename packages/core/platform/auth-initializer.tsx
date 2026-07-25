@@ -67,6 +67,8 @@ export function AuthInitializer({
           emailConfigured: cfg.email_configured === true,
           // Old servers omit this field — default false so TOTP UI stays hidden.
           totpSupported: cfg.totp_supported === true,
+          // Absent/false on the managed cloud and older servers → section hidden.
+          vcsIntegrationAvailable: cfg.vcs_integration_available === true,
         });
         configStore.getState().setDaemonConfig({
           daemonServerUrl: cfg.daemon_server_url,

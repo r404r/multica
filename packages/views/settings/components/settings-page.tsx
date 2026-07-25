@@ -15,6 +15,7 @@ import {
   MessageCircle,
   Tags,
   Keyboard,
+  ListTodo,
 } from "lucide-react";
 import { GitHubMark } from "./github-mark";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@multica/ui/components/ui/tabs";
@@ -24,6 +25,7 @@ import { useNavigation } from "../../navigation";
 import { AccountTab } from "./account-tab";
 import { PreferencesTab } from "./preferences-tab";
 import { ChatTab } from "./chat-tab";
+import { IssueTab } from "./issue-tab";
 import { TokensTab } from "./tokens-tab";
 import { WorkspaceTab } from "./workspace-tab";
 import { MembersTab } from "./members-tab";
@@ -42,6 +44,7 @@ const ACCOUNT_TAB_KEYS = [
   "profile",
   "preferences",
   "shortcuts",
+  "issue",
   "chat",
   "notifications",
   "security",
@@ -51,6 +54,7 @@ const ACCOUNT_TAB_ICONS = {
   profile: User,
   preferences: SlidersHorizontal,
   shortcuts: Keyboard,
+  issue: ListTodo,
   chat: MessageCircle,
   notifications: Bell,
   security: ShieldCheck,
@@ -219,6 +223,7 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
           <TabsContent value="profile"><AccountTab /></TabsContent>
           <TabsContent value="preferences"><PreferencesTab /></TabsContent>
           <TabsContent value="shortcuts"><KeyboardShortcutsTab /></TabsContent>
+          <TabsContent value="issue"><IssueTab /></TabsContent>
           <TabsContent value="chat"><ChatTab /></TabsContent>
           <TabsContent value="notifications"><NotificationsTab /></TabsContent>
           <TabsContent value="security"><SecurityTab /></TabsContent>
