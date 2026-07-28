@@ -104,6 +104,7 @@ type Config struct {
 	GCArtifactPatterns             []string              // basename patterns whose subtrees are removed during artifact cleanup (default: node_modules, .next, .turbo)
 	GCCodexSessionTTL              time.Duration         // reclaim a per-issue Codex session store (~/.codex/multica-sessions/<agent>/<issue>) untouched for at least this long, so a done/abandoned issue's conversation history does not accumulate forever (default: 14d, set 0 to disable)
 	AutoUpdateEnabled              bool                  // periodically check for a newer CLI release and self-update when idle (default: true on Multica Cloud, false on self-host)
+	SupervisorManaged              bool                  // disable every self-update/re-exec path; external supervisor owns process lifecycle
 	AutoUpdateCheckInterval        time.Duration         // how often the auto-update loop polls for a new release (default: 6h)
 	PollInterval                   time.Duration
 	HeartbeatInterval              time.Duration
@@ -152,6 +153,7 @@ type Overrides struct {
 	// is no symmetric "force on" override because the env/default already
 	// resolves to enabled; the flag exists so users can opt out from the CLI.
 	DisableAutoUpdate       bool
+	SupervisorManaged       bool
 	AutoUpdateCheckInterval time.Duration // 0 = use env/default
 }
 
@@ -562,6 +564,9 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if overrides.DisableAutoUpdate {
 		autoUpdateEnabled = false
 	}
+	if overrides.SupervisorManaged {
+		autoUpdateEnabled = false
+	}
 	autoUpdateInterval, err := durationFromEnv("MULTICA_DAEMON_AUTO_UPDATE_INTERVAL", DefaultAutoUpdateCheckInterval)
 	if err != nil {
 		return Config{}, err
@@ -588,6 +593,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		GCArtifactPatterns:             gcArtifactPatterns,
 		GCCodexSessionTTL:              gcCodexSessionTTL,
 		AutoUpdateEnabled:              autoUpdateEnabled,
+		SupervisorManaged:              overrides.SupervisorManaged,
 		AutoUpdateCheckInterval:        autoUpdateInterval,
 		HealthPort:                     healthPort,
 		MaxConcurrentTasks:             maxConcurrentTasks,

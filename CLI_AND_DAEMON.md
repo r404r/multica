@@ -109,6 +109,17 @@ To run in the foreground (useful for debugging):
 multica daemon start --foreground
 ```
 
+When an external supervisor such as systemd owns the daemon process and binary,
+run it in supervisor-managed mode:
+
+```bash
+multica daemon start --foreground --supervisor-managed
+```
+
+This disables periodic and server-requested CLI self-update and prevents the
+daemon from handing its lifecycle to a successor process. Upgrade the managed
+binary explicitly, then restart it through the external supervisor.
+
 ### Stop
 
 ```bash

@@ -98,6 +98,7 @@ func init() {
 	f.Duration("codex-handshake-timeout", 0, "Codex app-server startup RPC timeout (env: MULTICA_CODEX_HANDSHAKE_TIMEOUT)")
 	f.Int("max-concurrent-tasks", 0, "Max tasks running in parallel (env: MULTICA_DAEMON_MAX_CONCURRENT_TASKS)")
 	f.Bool("no-auto-update", false, "Disable periodic CLI self-update (env: MULTICA_DAEMON_AUTO_UPDATE=false)")
+	f.Bool("supervisor-managed", false, "Disable all CLI self-update and delegate process restarts to an external supervisor")
 	f.Duration("auto-update-interval", 0, "How often to poll GitHub for a newer release (env: MULTICA_DAEMON_AUTO_UPDATE_INTERVAL)")
 
 	daemonLogsCmd.Flags().BoolP("follow", "f", false, "Follow log output")
@@ -118,6 +119,7 @@ func init() {
 	rf.Duration("codex-handshake-timeout", 0, "Codex app-server startup RPC timeout (env: MULTICA_CODEX_HANDSHAKE_TIMEOUT)")
 	rf.Int("max-concurrent-tasks", 0, "Max tasks running in parallel (env: MULTICA_DAEMON_MAX_CONCURRENT_TASKS)")
 	rf.Bool("no-auto-update", false, "Disable periodic CLI self-update (env: MULTICA_DAEMON_AUTO_UPDATE=false)")
+	rf.Bool("supervisor-managed", false, "Disable all CLI self-update and delegate process restarts to an external supervisor")
 	rf.Duration("auto-update-interval", 0, "How often to poll GitHub for a newer release (env: MULTICA_DAEMON_AUTO_UPDATE_INTERVAL)")
 
 	df := daemonDiskUsageCmd.Flags()
@@ -639,6 +641,9 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	if b, _ := cmd.Flags().GetBool("no-auto-update"); b {
 		args = append(args, "--no-auto-update")
 	}
+	if b, _ := cmd.Flags().GetBool("supervisor-managed"); b {
+		args = append(args, "--supervisor-managed")
+	}
 	if d, _ := cmd.Flags().GetDuration("auto-update-interval"); d > 0 {
 		args = append(args, "--auto-update-interval", d.String())
 	}
@@ -778,6 +783,8 @@ func runDaemonForeground(cmd *cobra.Command) error {
 	if resolveDaemonDisableAutoUpdate(noAutoUpdateFlag, "MULTICA_DAEMON_AUTO_UPDATE", fileCfg.DisableAutoUpdate) {
 		overrides.DisableAutoUpdate = true
 	}
+	supervisorManaged, _ := cmd.Flags().GetBool("supervisor-managed")
+	overrides.SupervisorManaged = supervisorManaged
 	autoUpdateFlag, _ := cmd.Flags().GetDuration("auto-update-interval")
 	autoUpdateOverride, err := resolveDaemonDurationOverride(autoUpdateFlag, "MULTICA_DAEMON_AUTO_UPDATE_INTERVAL", fileCfg.AutoUpdateCheckInterval)
 	if err != nil {
@@ -812,8 +819,13 @@ func runDaemonForeground(cmd *cobra.Command) error {
 		return err
 	}
 
-	// Check if the daemon needs to restart after a CLI update.
-	if restartBin := d.RestartBinary(); restartBin != "" {
+	// A supervisor-managed daemon must never hand process ownership to a child.
+	restartBin := d.RestartBinary()
+	if err := validateSupervisorManagedRestart(cfg.SupervisorManaged, restartBin); err != nil {
+		logger.Error("refusing in-process daemon restart", "error", err)
+		return err
+	}
+	if restartBin != "" {
 		logger.Info("restarting daemon with updated binary", "path", restartBin)
 
 		// The successor will open daemon.log through its own rotating writer,
@@ -878,6 +890,13 @@ func runDaemonForeground(cmd *cobra.Command) error {
 		logger.Info("new daemon started", "pid", child.Process.Pid)
 	}
 
+	return nil
+}
+
+func validateSupervisorManagedRestart(supervisorManaged bool, restartBin string) error {
+	if supervisorManaged && restartBin != "" {
+		return fmt.Errorf("supervisor-managed daemon cannot self-restart into %s", restartBin)
+	}
 	return nil
 }
 

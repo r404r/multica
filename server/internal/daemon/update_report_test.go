@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -116,5 +117,40 @@ func TestReportUpdateResult_SendsCorrectPath(t *testing.T) {
 
 	if !strings.HasSuffix(path, "/api/daemon/runtimes/rt-a/update/upd-a/result") {
 		t.Fatalf("update path = %q", path)
+	}
+}
+
+func TestHandleUpdate_SupervisorManagedRefusesWithoutRunningUpdater(t *testing.T) {
+	var payload map[string]any
+	d, calls := updateReportDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode update result: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+	d.cfg.SupervisorManaged = true
+	updateRan := false
+	d.runUpdateFn = func(string) (string, error) {
+		updateRan = true
+		return "", nil
+	}
+
+	d.handleUpdate(context.Background(), "rt-managed", &PendingUpdate{
+		ID:            "upd-managed",
+		TargetVersion: "v9.9.9",
+	})
+
+	if updateRan {
+		t.Fatal("supervisor-managed update executed updater")
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("update result calls = %d, want 1", got)
+	}
+	if payload["status"] != "failed" {
+		t.Fatalf("update status = %v, want failed", payload["status"])
+	}
+	if msg, _ := payload["error"].(string); !strings.Contains(msg, "external supervisor") {
+		t.Fatalf("update error = %q, want external supervisor explanation", msg)
 	}
 }

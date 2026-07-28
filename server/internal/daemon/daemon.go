@@ -2666,6 +2666,15 @@ func (d *Daemon) reportRuntimeResultWithRetry(ctx context.Context, kind, runtime
 
 // handleUpdate performs the CLI update when triggered by the server via heartbeat.
 func (d *Daemon) handleUpdate(ctx context.Context, runtimeID string, update *PendingUpdate) {
+	if d.cfg.SupervisorManaged {
+		d.logger.Info("refusing CLI self-update: daemon is managed by an external supervisor", "runtime_id", runtimeID, "update_id", update.ID)
+		d.reportUpdateResult(ctx, runtimeID, update.ID, map[string]any{
+			"status": "failed",
+			"error":  "CLI is managed by an external supervisor — update the managed binary and restart the service",
+		})
+		return
+	}
+
 	// Desktop-managed daemons share their CLI binary with the Electron app,
 	// which is responsible for shipping and replacing it. Letting the daemon
 	// self-update would just get overwritten on the next Desktop launch and

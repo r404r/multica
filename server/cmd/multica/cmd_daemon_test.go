@@ -83,6 +83,32 @@ func TestBuildDaemonStartArgsForwardsCodexHandshakeTimeout(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonStartArgsForwardsSupervisorManaged(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("supervisor-managed", false, "")
+	if err := cmd.Flags().Set("supervisor-managed", "true"); err != nil {
+		t.Fatalf("set flag: %v", err)
+	}
+
+	args := buildDaemonStartArgs(cmd)
+	want := []string{"daemon", "start", "--foreground", "--supervisor-managed"}
+	if strings.Join(args, " ") != strings.Join(want, " ") {
+		t.Fatalf("buildDaemonStartArgs() = %q, want %q", args, want)
+	}
+}
+
+func TestValidateSupervisorManagedRestart(t *testing.T) {
+	if err := validateSupervisorManagedRestart(false, "/tmp/new-multica"); err != nil {
+		t.Fatalf("unmanaged restart rejected: %v", err)
+	}
+	if err := validateSupervisorManagedRestart(true, ""); err != nil {
+		t.Fatalf("empty restart path rejected: %v", err)
+	}
+	if err := validateSupervisorManagedRestart(true, "/tmp/new-multica"); err == nil {
+		t.Fatal("supervisor-managed restart accepted, want rejection")
+	}
+}
+
 // TestPrintDaemonStatusOmitsVersionWhenMissing pins the back-compat contract:
 // when the daemon doesn't report cli_version (older daemon paired with a newer
 // CLI) or reports an empty string, the CLI must skip the line entirely instead

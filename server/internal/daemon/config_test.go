@@ -591,6 +591,25 @@ func TestLoadConfig_AutoUpdate_NoFlagWinsOverCloudDefault(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_SupervisorManagedDisablesEveryAutoUpdate(t *testing.T) {
+	stageFakeAgent(t)
+	t.Setenv("MULTICA_DAEMON_AUTO_UPDATE", "true")
+	cfg, err := LoadConfig(Overrides{
+		ServerURL:         "https://api.multica.ai",
+		WorkspacesRoot:    t.TempDir(),
+		SupervisorManaged: true,
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.SupervisorManaged {
+		t.Fatal("SupervisorManaged = false, want true")
+	}
+	if cfg.AutoUpdateEnabled {
+		t.Fatal("AutoUpdateEnabled = true in supervisor-managed mode")
+	}
+}
+
 // TestResolveAgentsViaLoginShell_StripsAliasShadowing locks down the fix for
 // #2512: when the user's rc file declares an alias with the same name as the
 // agent CLI, the resolver must still return the real binary on PATH, not the
