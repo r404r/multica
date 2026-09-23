@@ -17,9 +17,9 @@ export function SettingsTab({
   return (
     <div className="space-y-8">
       <header>
-        <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
+        <h2 className="text-title-lg font-semibold tracking-tight">{title}</h2>
         {description ? (
-          <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
+          <p className="mt-1 max-w-2xl text-body leading-6 text-muted-foreground">
             {description}
           </p>
         ) : null}
@@ -47,9 +47,11 @@ export function SettingsSection({
       {title || description || action ? (
         <div className="flex min-w-0 items-end justify-between gap-4 px-0.5">
           <div className="min-w-0">
-            {title ? <h3 className="text-sm font-semibold">{title}</h3> : null}
+            {title ? (
+              <h3 className="text-body font-semibold">{title}</h3>
+            ) : null}
             {description ? (
-              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              <p className="mt-1 text-caption leading-5 text-muted-foreground">
                 {description}
               </p>
             ) : null}
@@ -119,22 +121,30 @@ export function SettingsRow({
   return (
     <div
       className={cn(
-        "flex min-h-16 flex-col gap-3 px-4 py-3.5 sm:flex-row sm:justify-between sm:gap-8",
-        align === "center" ? "sm:items-center" : "sm:items-start",
+        "flex min-h-16 gap-4 px-4 py-3.5 sm:justify-between sm:gap-8",
+        size ? "flex-col sm:flex-row" : "flex-row justify-between",
+        align === "center"
+          ? size
+            ? "sm:items-center"
+            : "items-center"
+          : size
+            ? "sm:items-start"
+            : "items-start",
         className,
       )}
     >
       <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium">{label}</div>
+        <div className="text-body font-medium">{label}</div>
         {description ? (
-          <div className="mt-0.5 text-xs leading-5 text-muted-foreground">
+          <div className="mt-0.5 text-caption leading-5 text-muted-foreground">
             {description}
           </div>
         ) : null}
       </div>
       <div
         className={cn(
-          "w-full shrink-0 sm:w-auto sm:max-w-[56%]",
+          "shrink-0 sm:w-auto sm:max-w-[56%]",
+          size ? "w-full" : "w-auto max-w-[56%]",
           size ? SETTINGS_CONTROL_WIDTHS[size] : undefined,
         )}
       >
@@ -179,7 +189,7 @@ export function SettingsSaveState({
     <span
       role="status"
       className={cn(
-        "inline-flex items-center gap-1.5 text-xs text-muted-foreground",
+        "inline-flex items-center gap-1.5 text-caption text-muted-foreground",
         status === "error" && "text-destructive",
       )}
     >

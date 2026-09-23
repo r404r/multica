@@ -33,7 +33,7 @@ import { copyText } from "@multica/ui/lib/clipboard";
 import { useT } from "../i18n";
 import { useDragToScroll } from "./hooks/use-drag-to-scroll";
 import { MermaidViewer } from "./mermaid-viewer";
-import type { Size } from "./utils/diagram-transform";
+import type { Size } from "./utils/zoom-transform";
 
 type MermaidAPI = typeof import("mermaid").default;
 
@@ -469,7 +469,7 @@ export function MermaidDiagram({ chart }: { chart: string }) {
     <div
       ref={containerRef}
       className="mermaid-diagram"
-      aria-label="Mermaid diagram"
+      aria-label={t(($) => $.mermaid.diagram_label)}
       style={containerStyle}
       data-overflow-start={overflow.start ? "" : undefined}
       data-overflow-end={overflow.end ? "" : undefined}
@@ -496,7 +496,7 @@ export function MermaidDiagram({ chart }: { chart: string }) {
                 height: rendered.layout ? `${rendered.layout.height}px` : undefined,
                 width: rendered.layout ? `${rendered.layout.width}px` : undefined,
               }}
-              title="Mermaid diagram"
+              title={t(($) => $.mermaid.diagram_label)}
             />
           </div>
           <div className="mermaid-diagram-toolbar">

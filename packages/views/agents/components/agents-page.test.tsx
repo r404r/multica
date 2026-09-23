@@ -90,6 +90,8 @@ vi.mock("sonner", () => ({
 }));
 
 vi.mock("@multica/core/agents", () => ({
+  isAgentRuntimeBound: (agent: { runtime_id: string; runtime_bound?: boolean }) =>
+    agent.runtime_bound !== false && agent.runtime_id.length > 0,
   agentRunCounts30dOptions: () => ({ queryKey: ["agent-run-counts"] }),
   useWorkspaceActivityMap: () => mocks.activity,
   useWorkspacePresenceMap: () => mocks.presence,
@@ -125,6 +127,7 @@ vi.mock("@multica/core/hooks", () => ({
 vi.mock("@multica/core/paths", () => ({
   useWorkspacePaths: () => ({
     newAgent: () => "/test-workspace/agents/new",
+    newAgentManual: () => "/test-workspace/agents/new/manual",
     agentDetail: (id: string) => `/test-workspace/agents/${id}`,
   }),
 }));
@@ -193,8 +196,8 @@ function makeAgent(over: Partial<Agent>): Agent {
 // Build a 30-bucket activity series whose most-recent bucket with runs is
 // `daysAgo` days back — `lastActiveDaysAgo` reads exactly this.
 function activityLastActive(daysAgo: number): AgentActivity {
-  const buckets = Array.from({ length: 30 }, () => ({ total: 0, failed: 0 }));
-  buckets[29 - daysAgo] = { total: 1, failed: 0 };
+  const buckets = Array.from({ length: 30 }, () => ({ total: 0, failed: 0, completed: 0, cancelled: 0 }));
+  buckets[29 - daysAgo] = { total: 1, failed: 0, completed: 1, cancelled: 0 };
   return { buckets, daysSinceCreated: 30 };
 }
 
@@ -210,6 +213,7 @@ function makeAdapter(
     back: vi.fn(),
     pathname: "/test-workspace/agents",
     searchParams: new URLSearchParams(),
+    hash: "",
     getShareableUrl: (p) => p,
     ...overrides,
   };

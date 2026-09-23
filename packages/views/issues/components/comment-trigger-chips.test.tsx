@@ -38,6 +38,38 @@ describe("CommentTriggerChips", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("describes @all semantics without promising any recipients", () => {
+    renderWithI18n(
+      <CommentTriggerChips
+        agents={[]}
+        hasAllMembersMention
+        suppressedAgentIds={new Set()}
+        onToggle={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("Member broadcast · @all does not start agents"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/notif/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps explicit agent triggers visible alongside @all semantics", () => {
+    renderWithI18n(
+      <CommentTriggerChips
+        agents={[bob]}
+        hasAllMembersMention
+        suppressedAgentIds={new Set()}
+        onToggle={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("Member broadcast · @all does not start agents"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button")).toHaveTextContent("Will start when sent");
+  });
+
   it("renders a single agent as a full sentence and toggles on click", () => {
     const onToggle = vi.fn();
     renderWithI18n(
@@ -139,9 +171,10 @@ describe("CommentTriggerChips", () => {
     );
 
     // The name the user typed (not a "1 mention won't trigger" count) plus the
-    // short no-permission reason.
+    // short reason, which must not assert a permission cause the server never
+    // gave: invocation_not_allowed also covers an unresolved id (MUL-5548).
     expect(screen.getByText("Go")).toBeInTheDocument();
-    expect(screen.getByText("No permission")).toBeInTheDocument();
+    expect(screen.getByText("Not found or no permission")).toBeInTheDocument();
     expect(screen.queryByText(/won't trigger/i)).not.toBeInTheDocument();
   });
 
@@ -164,7 +197,7 @@ describe("CommentTriggerChips", () => {
       />,
     );
 
-    expect(screen.getByText("No permission")).toBeInTheDocument();
+    expect(screen.getByText("Not found or no permission")).toBeInTheDocument();
     expect(screen.queryByText("Go")).not.toBeInTheDocument();
   });
 
@@ -183,7 +216,7 @@ describe("CommentTriggerChips", () => {
     );
 
     expect(screen.getByText("Go")).toBeInTheDocument();
-    expect(screen.getByText("No permission")).toBeInTheDocument();
+    expect(screen.getByText("Not found or no permission")).toBeInTheDocument();
     expect(screen.getByText("Ops")).toBeInTheDocument();
     expect(screen.getByText("Runtime offline")).toBeInTheDocument();
   });

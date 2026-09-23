@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -294,6 +295,10 @@ func (h *Handler) TOTPLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	tokenString, err := h.issueJWT(user)
 	if err != nil {
+		if errors.Is(err, auth.ErrTemporarilyDisabledUser) {
+			writeError(w, http.StatusForbidden, auth.TemporarilyDisabledUserError)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to issue token")
 		return
 	}
@@ -310,7 +315,7 @@ func (h *Handler) TOTPLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, LoginResponse{
 		Token: tokenString,
-		User:  userToResponse(user),
+		User:  h.userToResponse(user),
 	})
 }
 
