@@ -54,6 +54,12 @@ export function TOTPSetupDialog(props: {
       void request
         .then(({ secret: s, otpauth_url }) => {
           if (!active) return;
+          // An empty value is the schema fallback for a malformed response.
+          if (!s || !otpauth_url) {
+            toast.error(t(($) => $.security.two_factor.setup_init_error));
+            props.onOpenChange(false);
+            return;
+          }
           setSecret(s);
           setOtpauth(otpauth_url);
         })
@@ -90,7 +96,8 @@ export function TOTPSetupDialog(props: {
     if (code.length !== 6) return;
     setLoading(true);
     try {
-      await api.totpSetupVerify(code);
+      const { enabled } = await api.totpSetupVerify(code);
+      if (!enabled) throw new Error("setup not confirmed");
       toast.success(t(($) => $.security.two_factor.setup_success));
       props.onSuccess();
       props.onOpenChange(false);

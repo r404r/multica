@@ -84,4 +84,18 @@ describe("TOTPSetupDialog", () => {
     );
     expect(screen.getByText("shared-secret")).toBeInTheDocument();
   });
+
+  it("closes with an error instead of showing a QR code for a malformed setup", async () => {
+    mockTOTPSetupInit.mockResolvedValueOnce({ secret: "", otpauth_url: "" });
+    const onOpenChange = vi.fn();
+
+    render(
+      <TOTPSetupDialog open onOpenChange={onOpenChange} onSuccess={vi.fn()} />,
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {});
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(screen.queryByTestId("qr-code")).not.toBeInTheDocument();
+  });
 });
