@@ -36,7 +36,6 @@ const mockApiLoginWithTOTP = vi.hoisted(() => vi.fn());
 const mockApiSetToken = vi.hoisted(() => vi.fn());
 const mockApiGetMe = vi.hoisted(() => vi.fn());
 const mockApiIssueCliToken = vi.hoisted(() => vi.fn());
-const mockApiLoginWithTOTP = vi.hoisted(() => vi.fn());
 const mockSetQueryData = vi.hoisted(() => vi.fn());
 const mockTotpState = vi.hoisted(() => ({ totpSupported: false }));
 const mockTotpSupported = vi.hoisted(() => ({ getState: () => mockTotpState }));
@@ -88,7 +87,6 @@ vi.mock("@multica/core/api", () => ({
     setToken: mockApiSetToken,
     getMe: mockApiGetMe,
     issueCliToken: mockApiIssueCliToken,
-    loginWithTOTP: mockApiLoginWithTOTP,
   },
 }));
 
