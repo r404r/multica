@@ -35,13 +35,14 @@ export function SecurityTab() {
   const enabled = me?.totp_enabled === true;
 
   return (
-    <SettingsTab title={t(($) => $.page.tabs.security)}>
+    <SettingsTab title={t(($) => $.page.tabs.security)} scope="account">
       <SettingsSection
         title={t(($) => $.security.title)}
         description={t(($) => $.security.description)}
       >
         <SettingsCard>
           <SettingsRow
+            anchor="authenticator"
             label={t(($) => $.security.two_factor.label)}
             description={
               !totpSupported
