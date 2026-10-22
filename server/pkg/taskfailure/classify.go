@@ -43,6 +43,14 @@ var (
 // member-facing recovery guidance describe the actual failure.
 const concurrentRequestLimitWitness = "concurrent request limit"
 
+var httpForbiddenCodeRe = regexp.MustCompile(`(^|[^0-9])403([^0-9]|$)`)
+
+// isUsageLimit403 is shared by Classify and NormalizeDaemonReason so new and
+// old daemons land on the same reason.
+func isUsageLimit403(lower string) bool {
+	return httpForbiddenCodeRe.MatchString(lower) && strings.Contains(lower, "usage limit")
+}
+
 // Classify maps a free-form error string from the agent runtime / CLI
 // to one of the 14 agent_error.* sub-reasons. Always returns a valid
 // Reason; falls back to ReasonAgentUnknown when no rule matches and for
@@ -77,6 +85,24 @@ func Classify(rawError string) Reason {
 		return ReasonAgentUnknown
 	}
 	lower := strings.ToLower(trimmed)
+	// Cursor's adapter adds event counts to known transport failures. Those
+	// numbers are not HTTP status codes (event_count=429 is not a rate limit).
+	// Apply the existing precedence to the provider stderr, keeping real auth
+	// or quota evidence there while excluding the adapter's diagnostics.
+	if isCursorProviderNetworkError(lower) {
+		if stderr, wrapped := cursorProviderStderr(lower); wrapped {
+			lower = stderr
+		}
+		// Node stack locations such as index.js:500:403 are not HTTP codes
+		// either. Keep non-frame error lines, including actual provider errors.
+		lines := strings.Split(lower, "\n")
+		for i, line := range lines {
+			if cursorStackFrame(line) {
+				lines[i] = ""
+			}
+		}
+		lower = strings.Join(lines, "\n")
+	}
 
 	switch {
 	// A concurrent-request rejection can contain both "access token" and HTTP
@@ -84,6 +110,13 @@ func Classify(rawError string) Reason {
 	// rules below; this classification does not itself make the reason retryable.
 	case strings.Contains(lower, concurrentRequestLimitWitness):
 		return ReasonAgentProviderCapacityOrRateLimit
+
+	// Some providers (e.g. Kimi Code) report an exhausted usage window as HTTP
+	// 403, and Claude Code may prefix it with an access-token failure. It must
+	// beat both the token-window rule (the text has "token" and "limit") and
+	// the bare 403 auth rule, or valid credentials get blamed.
+	case isUsageLimit403(lower):
+		return ReasonAgentProviderQuotaLimit
 
 	// 1. Context / token window overflow. Checked early so "token
 	//    limit" doesn't get swallowed by the broader "limit" / "quota"
@@ -212,9 +245,9 @@ func Classify(rawError string) Reason {
 	//    messages and the stable Pi/OMP exit composite, rather than treating
 	//    the same broad substrings from local tools or MCP servers as retryable.
 	//    Mirror these Pi message shapes into the MUL-1949 offline backfill SQL.
-	//    Cursor can exit before its first stream event with a Node connect
-	//    ETIMEDOUT error. Keep that failed resume network-safe instead of
-	//    letting the exit-status wrapper trigger a fresh-session retry.
+	//    Cursor reports connect ETIMEDOUT and mid-stream RetriableError:
+	//    Connection stalled failures. Keep those failed resumes network-safe
+	//    instead of letting the exit-status wrapper trigger a fresh-session retry.
 	case isPiProviderNetworkError(lower), isCursorProviderNetworkError(lower),
 		containsAny(lower,
 			"stream disconnected",
@@ -433,18 +466,72 @@ var legacyEnvironmentPrepareWitnesses = []string{
 	"reuse execution environment:",
 }
 
-// isCursorProviderNetworkError recognizes the captured Cursor provider error,
-// bare or in the adapter's process-failure wrapper. Do not match ETIMEDOUT
-// globally: a local tool or MCP connection timeout is not provider evidence.
+// isCursorProviderNetworkError recognizes captured Cursor provider errors,
+// bare or in the adapter's exit/prompt-write wrapper. Do not match transport
+// phrases globally: local tool or MCP failures are not provider evidence.
 func isCursorProviderNetworkError(lower string) bool {
-	if strings.HasPrefix(lower, "cursor-agent exited with error: ") {
-		_, stderr, ok := strings.Cut(lower, "; cursor stderr: ")
-		if !ok {
-			return false
-		}
-		lower = strings.TrimSpace(stderr)
+	if stderr, wrapped := cursorProviderStderr(lower); wrapped {
+		lower = stderr
 	}
-	return strings.HasPrefix(lower, "error: [unavailable] connect etimedout ")
+	if strings.HasPrefix(lower, "error: [unavailable] connect etimedout ") {
+		return true
+	}
+	// Node may append a stack trace. Match the exact first-line message, not
+	// an arbitrary RetriableError or a substring quoted by another tool.
+	firstLine, _, _ := strings.Cut(lower, "\n")
+	switch strings.TrimSpace(firstLine) {
+	case "retriableerror: connection stalled", "retriableerror: connection stalled repeatedly":
+		return true
+	}
+	return false
+}
+
+func cursorProviderStderr(lower string) (string, bool) {
+	if !strings.HasPrefix(lower, "cursor-agent exited with error: ") &&
+		!strings.HasPrefix(lower, "cursor-agent prompt write failed: ") {
+		return "", false
+	}
+	_, stderr, ok := strings.Cut(lower, "; cursor stderr: ")
+	return strings.TrimSpace(stderr), ok
+}
+
+func cursorStackFrame(line string) bool {
+	return (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) &&
+		strings.HasPrefix(strings.TrimSpace(line), "at ")
+}
+
+// Refined status buckets can also be stale when an old daemon matched a count
+// or stack location. Require the same classification from that diagnostic text;
+// a plain transport message or a genuinely refined reason stays intact.
+func cursorDiagnosticReason(reason, lower string) bool {
+	switch Reason(reason) {
+	case ReasonAgentProviderAuthOrAccess, ReasonAgentProviderQuotaLimit,
+		ReasonAgentProviderCapacityOrRateLimit, ReasonAgentProviderServerError:
+	default:
+		return false
+	}
+	var diagnostics []string
+	if _, wrapped := cursorProviderStderr(lower); wrapped {
+		header, _, _ := strings.Cut(lower, "; cursor stderr: ")
+		if strings.Contains(header, " (result_seen=false, ") {
+			diagnostics = append(diagnostics, header)
+		}
+	}
+	for _, line := range strings.Split(lower, "\n") {
+		if cursorStackFrame(line) {
+			diagnostics = append(diagnostics, line)
+		}
+	}
+	return len(diagnostics) > 0 && Classify(strings.Join(diagnostics, "\n")) == Reason(reason)
+}
+
+// Older daemons report these Cursor transport failures as process_failure
+// (wrapped exit), unknown (bare stderr), or the coarse agent_error bucket.
+// Preserve more specific reasons such as auth, quota, and hard timeouts.
+var legacyCursorProviderNetworkReasons = map[string]bool{
+	string(ReasonAgentProcessFailure): true,
+	string(ReasonAgentUnknown):        true,
+	"agent_error":                     true,
 }
 
 func isPiProviderNetworkError(lower string) bool {
@@ -495,6 +582,16 @@ var legacyConcurrentRequestLimitReasons = map[string]bool{
 	"agent_error":                           true,
 }
 
+// legacyUsageLimit403Reasons are the stale buckets an older daemon lands a
+// 403 usage-limit rejection in: the bare 403 auth rule, the token-window rule
+// when an access-token prefix is present, or the catchalls.
+var legacyUsageLimit403Reasons = map[string]bool{
+	string(ReasonAgentContextOverflow):      true,
+	string(ReasonAgentProviderAuthOrAccess): true,
+	string(ReasonAgentUnknown):              true,
+	"agent_error":                           true,
+}
+
 // NormalizeDaemonReason upgrades a failure_reason reported by an older daemon
 // onto the taxonomy this server understands, using the raw error text as the
 // witness. It returns the reason unchanged when nothing applies.
@@ -514,6 +611,9 @@ func NormalizeDaemonReason(reason, rawError string) Reason {
 	if legacyConcurrentRequestLimitReasons[reason] &&
 		strings.Contains(strings.ToLower(rawError), concurrentRequestLimitWitness) {
 		return ReasonAgentProviderCapacityOrRateLimit
+	}
+	if legacyUsageLimit403Reasons[reason] && isUsageLimit403(strings.ToLower(rawError)) {
+		return ReasonAgentProviderQuotaLimit
 	}
 	if legacySkillBundleReasons[reason] &&
 		strings.HasPrefix(strings.TrimSpace(rawError), legacySkillBundlePrefix) {
@@ -540,6 +640,13 @@ func NormalizeDaemonReason(reason, rawError string) Reason {
 	// flaky provider. Upgrading here makes the retry work the moment the server
 	// deploys, without waiting on the daemon fleet.
 	lowerError := strings.ToLower(strings.TrimSpace(rawError))
+	// Normalize before retry eligibility is evaluated so installed daemons
+	// receive the same bounded, resume-safe recovery as current ones. Retain
+	// Classify's precedence if a more specific provider failure is present.
+	if (legacyCursorProviderNetworkReasons[reason] || cursorDiagnosticReason(reason, lowerError)) &&
+		isCursorProviderNetworkError(lowerError) && Classify(rawError) == ReasonAgentProviderNetwork {
+		return ReasonAgentProviderNetwork
+	}
 	if legacyOpencodeStreamEndedReasons[reason] &&
 		(strings.HasPrefix(lowerError, opencodeStreamEndedPrefix) ||
 			strings.HasPrefix(lowerError, codeartsStreamEndedPrefix)) {
