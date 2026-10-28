@@ -238,7 +238,7 @@ export function RuntimesPage({
   }
 
   const isDesktop = hasLocalMachine === true;
-  const qoder = qoderConnection?.available === true ? qoderConnection : null;
+  const qoder = qoderConnection ?? null;
   const qoderHref = paths.runtimeDetail(QODER_RUNTIME_LOCATOR);
   // Qoder's runtime registers like a machine, but it is listed once, as a
   // cloud service — never as a machine, even when this server cannot run
@@ -311,7 +311,6 @@ export function RuntimesPage({
         icon={Server}
         title={t(($) => $.page.title)}
         count={totalCount}
-        description={t(($) => $.page.tagline)}
         learnMore={{
           href: daemonRuntimesDocsHref(i18n.language),
           label: t(($) => $.page.learn_more),
