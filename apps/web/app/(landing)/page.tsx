@@ -1,23 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { pageMetadata } from "@/features/landing/utils/page-metadata";
 import { RedirectIfAuthenticated } from "@/features/landing/components/redirect-if-authenticated";
 
-export const metadata: Metadata = {
-  title: {
-    absolute: "Multica — Project Management for Human + Agent Teams",
-  },
-  description:
-    "Source-available platform that turns coding agents into real teammates. Assign tasks, track progress, compound skills.",
-  openGraph: {
-    title: "Multica — Project Management for Human + Agent Teams",
-    description:
-      "Manage your human + agent workforce in one place.",
-    url: "/",
-  },
-  alternates: {
-    canonical: "/",
-  },
-};
+export function generateMetadata(): Promise<Metadata> {
+  return pageMetadata("home", "/");
+}
 
 export default function LandingPage() {
   return (
