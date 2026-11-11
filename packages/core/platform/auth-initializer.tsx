@@ -95,7 +95,6 @@ export function AuthInitializer({
           daemonAppUrl: cfg.daemon_app_url,
           daemonSetupTarget,
         });
-        configStore.getState().setStarPromptDisabled(cfg.star_prompt_disabled);
         configStore.getState().setFeatureFlags(cfg.feature_flags);
         configStore.getState().setServerVersion(cfg.server_version);
         // Absent on every server that predates the worktree save gate, which
@@ -123,6 +122,7 @@ export function AuthInitializer({
           .setCommentDeleteKeepRepliesSupported(
             cfg.comment_delete_keep_replies_supported === true,
           );
+        configStore.getState().setThemeStoreEnabled(cfg.theme_store_enabled === true);
         if (cfg.posthog_key) {
           initAnalytics({
             key: cfg.posthog_key,
