@@ -98,6 +98,14 @@ SMTP takes priority over Resend whenever `SMTP_HOST` is non-empty.
 | `SMTP_TLS_INSECURE` | `false` | Skips certificate verification; trusted internal networks only |
 | `SMTP_EHLO_NAME` | hostname | EHLO/FQDN required by strict relays |
 
+### Notification emails [#email-notifications]
+
+With Resend or SMTP configured, the server also emails members their new inbox notifications (see [Inbox](/inbox#email-notifications)). Links in these emails use `MULTICA_APP_URL`. Sends are paced on each backend replica; in a very large burst some emails are skipped, while the inbox still keeps every notification.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMAIL_NOTIFICATION_SEND_INTERVAL` | `1s` | Minimum spacing between notification emails on each backend replica, as a Go duration. The default stays under Resend's 2 requests per second, so sign-in codes and invitations on the same key aren't rate-limited. With N replicas sharing a key, use about N × `1s` |
+
 ### Google OAuth
 
 | Variable | Default | Description |
@@ -185,11 +193,14 @@ The auth rate limits require `REDIS_URL`; without it, the startup log notes that
 |---|---|---|
 | GitHub | `GITHUB_APP_SLUG` | GitHub App slug |
 | GitHub | `GITHUB_WEBHOOK_SECRET` | Webhook HMAC and connect-state signing secret |
-| GitHub | `GITHUB_APP_ID` | Needed for CI status and mergeability on PR cards and the "pick from GitHub" repository picker |
-| GitHub | `GITHUB_APP_PRIVATE_KEY` | Full PEM private key paired with the App ID; same uses as above |
+| GitHub | `GITHUB_APP_CLIENT_ID` | App Client ID. Required to verify the connecting user can access the installation |
+| GitHub | `GITHUB_APP_CLIENT_SECRET` | Client secret paired with the Client ID; required for new connections |
+| GitHub | `GITHUB_APP_ID` | Required for new connections to verify installation control; also used by PR cards and repository browsing |
+| GitHub | `GITHUB_APP_PRIVATE_KEY` | Required for new connections to verify installation control; also used by PR cards and repository browsing |
 | Lark | `MULTICA_LARK_SECRET_KEY` | Base64-encoded 32-byte credential encryption key |
 | Slack | `MULTICA_SLACK_SECRET_KEY` | Base64-encoded 32-byte token encryption key |
 | Telegram | `MULTICA_TELEGRAM_SECRET_KEY` | Base64-encoded 32-byte Bot token encryption key |
+| WeChat | `MULTICA_WEIXIN_SECRET_KEY` | Base64-encoded 32-byte encryption key for WeChat bot credentials and QR state |
 | Telegram | `MULTICA_TELEGRAM_TOOL_PROGRESS` | Tool steps shown in the streamed reply: `auto` (default: details in private chats, kind of work in groups), `off`, `summary` or `detail` |
 | Composio | `COMPOSIO_API_KEY` | Enables Composio tool connections |
 | Composio | `COMPOSIO_CALLBACK_BASE_URL` | Callback API URL; can fall back to `MULTICA_PUBLIC_URL` |
@@ -200,7 +211,6 @@ The auth rate limits require `REDIS_URL`; without it, the startup log notes that
 | Plugins | `MULTICA_PLUGIN_SURFACE_ORIGIN` | Dedicated cookie-free browser origin routed to this backend; must differ from app/API origins and preserve `Host` |
 | Plugins | `MULTICA_PLUGIN_API_URL` | Complete versioned Plugin Public API base URL, such as `https://plugin-api.example.com/v1`; falls back to `MULTICA_PUBLIC_URL` + `/v1` |
 | Plugins | `MULTICA_PLUGIN_DIR` | Optional absolute directory used to publish local plugin bundles during development |
-| Theme store | `MULTICA_THEME_STORE` | On by default, reading the official [multica-themes](https://github.com/multica-ai/multica-themes) registry; `off` turns the community theme store off and stops every registry request |
 | Theme store | `MULTICA_THEME_REGISTRY_URL` | Another registry's `index.json`, such as a fork of the official one; see [Themes and appearance](/themes#self-hosting) |
 
 Without `GITHUB_APP_ID` and the private key, PRs still link, mirror, and move issues on merge normally, but cards show no CI or mergeability status, and the "pick from GitHub" repository entry is disabled.

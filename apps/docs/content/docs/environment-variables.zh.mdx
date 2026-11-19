@@ -98,6 +98,14 @@ MULTICA_PUBLIC_URL=https://api.multica.example.com
 | `SMTP_TLS_INSECURE` | `false` | 跳过证书校验，仅用于可信内网 |
 | `SMTP_EHLO_NAME` | 主机名 | 严格 relay 要求的 EHLO/FQDN |
 
+### 通知邮件 [#email-notifications]
+
+配置了 Resend 或 SMTP 后，服务器还会把新的收件箱通知发邮件给成员（见[收件箱](/inbox#email-notifications)）。邮件里的链接使用 `MULTICA_APP_URL`。每个后端副本会控制发送间隔；短时间内通知特别多时，部分邮件会被跳过，收件箱里仍保留全部通知。
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `EMAIL_NOTIFICATION_SEND_INTERVAL` | `1s` | 每个后端副本发送通知邮件的最小间隔，Go duration 格式。默认值低于 Resend 每秒 2 次请求的限制，使用同一个 key 发送的登录验证码和邀请邮件不会被限流。N 个副本共用一个 key 时，设为约 N × `1s` |
+
 ### Google OAuth
 
 | 变量 | 默认值 | 说明 |
@@ -185,11 +193,14 @@ MULTICA_PUBLIC_URL=https://api.multica.example.com
 |---|---|---|
 | GitHub | `GITHUB_APP_SLUG` | GitHub App slug |
 | GitHub | `GITHUB_WEBHOOK_SECRET` | Webhook HMAC 与连接 state 签名密钥 |
-| GitHub | `GITHUB_APP_ID` | PR 卡片的 CI 状态、可合并性和"从 GitHub 选择"仓库都需要它 |
-| GitHub | `GITHUB_APP_PRIVATE_KEY` | 与 App ID 配套的完整 PEM 私钥，用途同上 |
+| GitHub | `GITHUB_APP_CLIENT_ID` | App 的 Client ID。新连接必需，用于校验操作者能否访问该 installation |
+| GitHub | `GITHUB_APP_CLIENT_SECRET` | 与 Client ID 配对的 client secret，新连接必需 |
+| GitHub | `GITHUB_APP_ID` | 新连接必需，用于验证安装管理权限；也用于 PR 卡片和仓库浏览 |
+| GitHub | `GITHUB_APP_PRIVATE_KEY` | 新连接必需，用于验证安装管理权限；也用于 PR 卡片和仓库浏览 |
 | 飞书 | `MULTICA_LARK_SECRET_KEY` | base64 编码的 32 字节凭据加密密钥 |
 | Slack | `MULTICA_SLACK_SECRET_KEY` | base64 编码的 32 字节 token 加密密钥 |
 | Telegram | `MULTICA_TELEGRAM_SECRET_KEY` | base64 编码的 32 字节 Bot token 加密密钥 |
+| WeChat | `MULTICA_WEIXIN_SECRET_KEY` | Base64 编码的 32 字节密钥，加密微信机器人凭据和扫码状态 |
 | Telegram | `MULTICA_TELEGRAM_TOOL_PROGRESS` | 流式回复中展示的工具步骤：`auto`（默认，私聊显示细节，群聊只显示工作类型）、`off`、`summary` 或 `detail` |
 | Composio | `COMPOSIO_API_KEY` | 启用 Composio 工具连接 |
 | Composio | `COMPOSIO_CALLBACK_BASE_URL` | 回调 API 地址；可回退到 `MULTICA_PUBLIC_URL` |
@@ -200,7 +211,6 @@ MULTICA_PUBLIC_URL=https://api.multica.example.com
 | 插件 | `MULTICA_PLUGIN_SURFACE_ORIGIN` | 路由到后端的独立无 Cookie 浏览器 origin；必须不同于 app/API origin，并保留 `Host` |
 | 插件 | `MULTICA_PLUGIN_API_URL` | 带版本的插件 Public API 完整 Base URL，例如 `https://plugin-api.example.com/v1`；未设置时使用 `MULTICA_PUBLIC_URL` + `/v1` |
 | 插件 | `MULTICA_PLUGIN_DIR` | 开发时用于发布本地插件包的可选绝对目录 |
-| 主题商店 | `MULTICA_THEME_STORE` | 默认开启，读取官方 [multica-themes](https://github.com/multica-ai/multica-themes) 仓库；设为 `off` 关闭社区主题商店，服务端不再请求仓库 |
 | 主题商店 | `MULTICA_THEME_REGISTRY_URL` | 改用其他仓库的 `index.json`，比如官方仓库的 fork；见 [主题与外观](/themes#自托管) |
 
 不配置 `GITHUB_APP_ID` 和私钥时，PR 仍会正常关联、镜像，并在合并后改状态，但卡片上不显示 CI 与可合并状态，"从 GitHub 选择"仓库入口也会禁用。

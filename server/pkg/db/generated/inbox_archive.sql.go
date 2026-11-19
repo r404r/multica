@@ -290,7 +290,8 @@ WITH base AS MATERIALIZED (
     ORDER BY created_at DESC, id DESC
     LIMIT $19::int
 )
-SELECT i.id, i.workspace_id, i.recipient_type, i.recipient_id, i.type, i.severity, i.issue_id, i.title, i.body, i.read, i.archived, i.created_at, i.actor_type, i.actor_id, i.details, i.section, selected.issue_status, selected.issue_priority,
+SELECT i.id, i.workspace_id, i.recipient_type, i.recipient_id, i.type, i.severity, i.issue_id, i.title, i.body, i.read, i.archived, i.created_at, i.actor_type, i.actor_id, i.details, i.section, i.snoozed_until, i.snoozed_at, selected.issue_status, selected.issue_priority,
+       iss.number AS issue_number,
        iss.project_id AS issue_project_id,
        iss.assignee_type AS issue_assignee_type,
        iss.assignee_id AS issue_assignee_id,
@@ -343,6 +344,7 @@ type ListArchivedInboxPageRow struct {
 	InboxItem         InboxItem   `json:"inbox_item"`
 	IssueStatus       pgtype.Text `json:"issue_status"`
 	IssuePriority     pgtype.Text `json:"issue_priority"`
+	IssueNumber       pgtype.Int4 `json:"issue_number"`
 	IssueProjectID    pgtype.UUID `json:"issue_project_id"`
 	IssueAssigneeType pgtype.Text `json:"issue_assignee_type"`
 	IssueAssigneeID   pgtype.UUID `json:"issue_assignee_id"`
@@ -356,6 +358,8 @@ type ListArchivedInboxPageRow struct {
 // MATCHING notification, which is the row the list renders; issue filters and
 // "unread" then test that group. Issue filters never match a notification
 // without an issue, "is not" included. Type groups mirror INBOX_TYPE_GROUPS.
+// review_requested, task_completed, agent_blocked and agent_completed are no
+// longer written, but archived rows from older servers still carry them.
 // Select narrow group representatives before loading bodies or comment anchors.
 func (q *Queries) ListArchivedInboxPage(ctx context.Context, arg ListArchivedInboxPageParams) ([]ListArchivedInboxPageRow, error) {
 	rows, err := q.db.Query(ctx, listArchivedInboxPage,
@@ -403,8 +407,11 @@ func (q *Queries) ListArchivedInboxPage(ctx context.Context, arg ListArchivedInb
 			&i.InboxItem.ActorID,
 			&i.InboxItem.Details,
 			&i.InboxItem.Section,
+			&i.InboxItem.SnoozedUntil,
+			&i.InboxItem.SnoozedAt,
 			&i.IssueStatus,
 			&i.IssuePriority,
+			&i.IssueNumber,
 			&i.IssueProjectID,
 			&i.IssueAssigneeType,
 			&i.IssueAssigneeID,

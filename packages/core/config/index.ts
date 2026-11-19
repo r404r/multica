@@ -47,6 +47,7 @@ interface ConfigState {
   // Older handlers accepted the unknown field and returned success while
   // dropping it, so absent must fail closed.
   agentConversationStartersSupported: boolean;
+  webhookPayloadConditionsSupported: boolean;
   // Whether POST /api/issues atomically persists custom-property values.
   // Older servers silently drop the field, so absent must fail closed.
   issueCreatePropertiesSupported: boolean;
@@ -78,6 +79,7 @@ interface ConfigState {
   setServerVersion: (version?: string) => void;
   setLocalWorktreeSupported: (supported?: boolean) => void;
   setAgentConversationStartersSupported: (supported?: boolean) => void;
+  setWebhookPayloadConditionsSupported: (supported?: boolean) => void;
   setIssueCreatePropertiesSupported: (supported?: boolean) => void;
   setCommentDeleteKeepRepliesSupported: (supported?: boolean) => void;
   setThemeStoreEnabled: (enabled?: boolean) => void;
@@ -101,6 +103,7 @@ export const configStore = createStore<ConfigState>((set) => ({
   serverVersion: "",
   localWorktreeSupported: false,
   agentConversationStartersSupported: false,
+  webhookPayloadConditionsSupported: false,
   issueCreatePropertiesSupported: false,
   commentDeleteKeepRepliesSupported: false,
   themeStoreEnabled: false,
@@ -139,6 +142,8 @@ export const configStore = createStore<ConfigState>((set) => ({
     set({ localWorktreeSupported: supported === true }),
   setAgentConversationStartersSupported: (supported = false) =>
     set({ agentConversationStartersSupported: supported === true }),
+  setWebhookPayloadConditionsSupported: (supported = false) =>
+    set({ webhookPayloadConditionsSupported: supported === true }),
   setIssueCreatePropertiesSupported: (supported = false) =>
     set({ issueCreatePropertiesSupported: supported === true }),
   setCommentDeleteKeepRepliesSupported: (supported = false) =>
