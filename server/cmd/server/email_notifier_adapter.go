@@ -7,6 +7,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/integrations/email"
+	"github.com/multica-ai/multica/server/internal/projectaccess"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -45,8 +47,12 @@ func (a emailNotifierQueries) GetWorkspaceSlug(ctx context.Context, wsID pgtype.
 	return w.Slug, nil
 }
 
-func (a emailNotifierQueries) IsWorkspaceMember(ctx context.Context, wsID, userID pgtype.UUID) (bool, error) {
-	_, err := a.q.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
+// CanSeeIssue applies the same project visibility the inbox applies when it
+// is read (projectaccess.ForMember): a guest sees only its projects' issues
+// and nothing outside a project, anyone else every issue outside the private
+// projects they are not in.
+func (a emailNotifierQueries) CanSeeIssue(ctx context.Context, wsID, userID pgtype.UUID, issueID string) (bool, error) {
+	member, err := a.q.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
 		UserID:      userID,
 		WorkspaceID: wsID,
 	})
@@ -56,5 +62,30 @@ func (a emailNotifierQueries) IsWorkspaceMember(ctx context.Context, wsID, userI
 	if err != nil {
 		return false, err
 	}
-	return true, nil
+	hidden, err := projectaccess.ForMember(ctx, a.q, member)
+	if err != nil {
+		return false, err
+	}
+	if hidden.Empty() {
+		return true, nil
+	}
+	var projectID pgtype.UUID // invalid: outside any project
+	if issueID != "" {
+		id, err := util.ParseUUID(issueID)
+		if err != nil {
+			return false, err
+		}
+		issue, err := a.q.GetIssue(ctx, id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if issue.WorkspaceID != wsID {
+			return false, nil
+		}
+		projectID = issue.ProjectID
+	}
+	return hidden.CanSeeProject(projectID), nil
 }

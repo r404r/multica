@@ -49,6 +49,7 @@ type fakeQueries struct {
 	prefsErr      error
 	workspaceSlug string
 	nonMembers    map[string]bool // uuidString → removed from the workspace
+	hiddenIssues  map[string]bool // issue id → hidden from every recipient
 	memberErr     error
 }
 
@@ -77,11 +78,11 @@ func (f *fakeQueries) GetNotificationPreference(ctx context.Context,
 func (f *fakeQueries) GetWorkspaceSlug(ctx context.Context, wsID pgtype.UUID) (string, error) {
 	return f.workspaceSlug, nil
 }
-func (f *fakeQueries) IsWorkspaceMember(ctx context.Context, wsID, userID pgtype.UUID) (bool, error) {
+func (f *fakeQueries) CanSeeIssue(ctx context.Context, wsID, userID pgtype.UUID, issueID string) (bool, error) {
 	if f.memberErr != nil {
 		return false, f.memberErr
 	}
-	return !f.nonMembers[uuidString(userID)], nil
+	return !f.nonMembers[uuidString(userID)] && !f.hiddenIssues[issueID], nil
 }
 
 func mustUUID(s string) pgtype.UUID {
@@ -662,5 +663,39 @@ func TestNotifier_SkipsRecipientsOutsideTheWorkspace(t *testing.T) {
 				t.Fatalf("expected no email, got %d", len(calls))
 			}
 		})
+	}
+}
+
+// A guest's inbox rows are filtered by project only when the inbox is read,
+// so the notifier itself must not email an issue the recipient cannot see.
+func TestNotifier_SkipsIssuesHiddenFromRecipient(t *testing.T) {
+	const alice = `"11111111-1111-1111-1111-111111111111"`
+	const issueID = "33333333-3333-3333-3333-333333333333"
+	q := &fakeQueries{
+		emails:       map[string]string{alice: "alice@example.com"},
+		hiddenIssues: map[string]bool{issueID: true},
+	}
+	bus := events.New()
+	sender := &fakeSender{}
+	n := NewNotifier(q, sender, NotifierConfig{Renderer: NewRenderer("https://app.example.com")})
+	n.Register(bus)
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventInboxNew,
+		WorkspaceID: "22222222-2222-2222-2222-222222222222",
+		Payload: map[string]any{
+			"item": map[string]any{
+				"recipient_type": "member",
+				"recipient_id":   "11111111-1111-1111-1111-111111111111",
+				"type":           "mentioned",
+				"title":          "Unshared plan",
+				"issue_id":       issueID,
+			},
+		},
+	})
+	n.WaitInflight()
+
+	if calls := sender.Calls(); len(calls) != 0 {
+		t.Fatalf("expected no email for a hidden issue, got %d", len(calls))
 	}
 }
