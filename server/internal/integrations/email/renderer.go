@@ -124,6 +124,14 @@ func actionVerb(notifType string) string {
 		return "App action result"
 	case "project_owner_joined":
 		return "Owner joined project"
+	case "app_tool_calls_quota_exceeded":
+		return "App call limit reached"
+	case "doc_comment":
+		return "New comment on a doc"
+	case "doc_mentioned":
+		return "Mentioned in a doc"
+	case "blockers_done":
+		return "Waiting tasks ended"
 	default:
 		return "Update"
 	}
